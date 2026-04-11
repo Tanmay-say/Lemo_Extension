@@ -1,0 +1,32 @@
+fastapi
+prisma
+uvicorn[standard]
+beautifulsoup4
+sentence_transformers
+ddgs
+python-dotenv
+redis
+numpy
+pydantic
+
+# Async HTTP client (replaces requests)
+httpx
+
+# ScrapingBee client
+scrapingbee
+
+# JWT Authentication & SIWE
+pyjwt
+python-jose[cryptography]
+siwe
+eth-account
+
+# Rate limiting
+slowapi
+
+# LLM integrations
+langchain
+langchain_core
+langchain_google_genai
+langchain-openai
+langchain-anthropic

@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Lemo AI Assistant",
+  "version": "2.0",
+  "description": "Modern AI chatbot with product comparison and wallet integration",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; connect-src 'self' wss://*.appsync-realtime-api.eu-west-1.amazonaws.com https://*.infura.io https://api.calibration.node.glif.io"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/content/index.jsx"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_title": "Toggle Lemo AI Assistant"
+  },
+  "background": {
+    "service_worker": "src/background/index.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/content/*", "logo.png"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}

@@ -31,6 +31,15 @@ dist/
 dist
 
 # Environment files (comprehensive coverage)
+*.env
+*/.env
+*/.env.local
+lemo-fastapi/.env
+lemo-fastapi/.env.local
+lemo-extension/.env
+lemo-extension/.env.local
+lemo-contracts/.env
+lemo-contracts/.env.local
 
 *token.json*
 *credentials.json*

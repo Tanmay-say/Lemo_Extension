@@ -14,12 +14,17 @@
     "https://*/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; connect-src 'self' wss://*.appsync-realtime-api.eu-west-1.amazonaws.com https://*.infura.io https://api.calibration.node.glif.io"
+    "extension_pages": "script-src 'self'; connect-src 'self' http://localhost:8000 https://*.appsync-realtime-api.eu-west-1.amazonaws.com https://*.infura.io https://api.calibration.node.glif.io https://node.lighthouse.storage https://gateway.lighthouse.storage"
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/content/index.jsx"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/content/index.jsx"
+      ],
       "run_at": "document_end"
     }
   ],
@@ -32,8 +37,14 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["src/content/*", "logo.png"],
-      "matches": ["http://*/*", "https://*/*"]
+      "resources": [
+        "src/content/*",
+        "logo.png"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
     }
   ]
 }

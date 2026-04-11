@@ -6,16 +6,20 @@ from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from prisma import Prisma
+from core.database import prisma, get_prisma
 from siwe import SiweMessage
-from eth_account.messages import encode_defunct
-from eth_account import Account
 import os
 
-prisma = Prisma()
 
-# JWT Configuration
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_THIS_SECRET_KEY")
+# JWT Configuration — JWT_SECRET_KEY MUST be set in .env; crash loudly if not
+_jwt_secret = os.getenv("JWT_SECRET_KEY")
+if not _jwt_secret:
+    raise RuntimeError(
+        "JWT_SECRET_KEY is not set in environment. "
+        "Set it to a long random secret in your .env file. "
+        "Do NOT use a default value in production."
+    )
+JWT_SECRET_KEY = _jwt_secret
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
@@ -142,5 +146,5 @@ async def get_optional_user(request: Request):
         )
         
         return user if user and user.is_active else None
-    except:
+    except Exception:
         return None

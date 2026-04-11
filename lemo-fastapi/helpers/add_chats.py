@@ -1,7 +1,5 @@
 from helpers.redis_functions import add_message_to_chat
-from prisma import Prisma
-
-prisma = Prisma()
+from core.database import prisma, get_prisma
 
 async def add_chats(session_id: str, message: str, message_type: str, detected_intent: str, user_id: str):
     try:
@@ -22,9 +20,8 @@ async def add_chats(session_id: str, message: str, message_type: str, detected_i
             print(f"[ERROR] Detected intent must be a string with max length 100")
             return {"status": "error", "message": "Detected intent must be a string with max length 100"}
         
-        # Connect to database if not connected
-        if not prisma.is_connected():
-            await prisma.connect()
+        # Use shared Prisma singleton
+        await get_prisma()
         
         # Save message to database
         try:
@@ -42,12 +39,13 @@ async def add_chats(session_id: str, message: str, message_type: str, detected_i
             print(f"[ERROR] Failed to save message to database: {e}")
             return {"status": "error", "message": f"Failed to save message to database: {str(e)}"}
         
-        # Store message in Redis
-        result = add_message_to_chat(session_id, message, message_type, detected_intent)
-        
-        if result.get("status") == "error":
-            print(f"[ERROR] Failed to store message in Redis: {result.get('message')}")
-            return result
+        # Store message in Redis (best-effort — may fail if Redis is not configured)
+        try:
+            result = add_message_to_chat(session_id, message, message_type, detected_intent)
+            if result.get("status") == "error":
+                print(f"[WARNING] Failed to store message in Redis: {result.get('message')}")
+        except Exception as redis_err:
+            print(f"[WARNING] Redis store skipped: {redis_err}")
         
         print(f"[LOG] Message successfully added for session {session_id}")
         return {"status": "success", "message": "Message added", "message_id": new_message.id}

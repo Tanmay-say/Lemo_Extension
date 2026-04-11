@@ -1,12 +1,9 @@
-from prisma import Prisma
-
-prisma = Prisma()
+from core.database import prisma, get_prisma
 
 async def get_session_details(session_id: str, user_id: str):
     try:
-        # Connect to database if not connected
-        if not prisma.is_connected():
-            await prisma.connect()
+        # Use shared Prisma singleton
+        await get_prisma()
         
         # Get session with messages
         session = await prisma.chat_sessions.find_first(

@@ -1,5 +1,5 @@
 // Enhanced Wallet Bridge - Direct MetaMask access with token balances
-(function() {
+(function () {
   'use strict';
 
   // Token contract addresses on different networks
@@ -17,23 +17,23 @@
   const ERC20_ABI = [
     {
       "constant": true,
-      "inputs": [{"name": "_owner", "type": "address"}],
+      "inputs": [{ "name": "_owner", "type": "address" }],
       "name": "balanceOf",
-      "outputs": [{"name": "balance", "type": "uint256"}],
+      "outputs": [{ "name": "balance", "type": "uint256" }],
       "type": "function"
     },
     {
       "constant": true,
       "inputs": [],
       "name": "decimals",
-      "outputs": [{"name": "", "type": "uint8"}],
+      "outputs": [{ "name": "", "type": "uint8" }],
       "type": "function"
     },
     {
       "constant": true,
       "inputs": [],
       "name": "symbol",
-      "outputs": [{"name": "", "type": "string"}],
+      "outputs": [{ "name": "", "type": "string" }],
       "type": "function"
     }
   ];
@@ -57,7 +57,7 @@
               // Check if MetaMask is installed and get accounts
               const accounts = await window.ethereum.request({ method: 'eth_accounts' });
               const networkId = await window.ethereum.request({ method: 'net_version' });
-              
+
               result = {
                 isInstalled: true,
                 accounts: accounts,
@@ -83,7 +83,7 @@
           try {
             const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
             const networkId = await window.ethereum.request({ method: 'net_version' });
-            
+
             result = {
               accounts: accounts,
               network: {
@@ -112,7 +112,7 @@
 
             const networkId = await window.ethereum.request({ method: 'net_version' });
             const userAddress = accounts[0];
-            
+
             // Get ETH balance
             const ethBalance = await window.ethereum.request({
               method: 'eth_getBalance',
@@ -143,18 +143,18 @@
           try {
             const { tokenSymbol, account } = event.data;
             console.log('[Wallet Bridge] Processing token balance request for:', tokenSymbol, 'account:', account);
-            
+
             if (!tokenSymbol) {
               throw new Error('Token symbol is required');
             }
-            
+
             if (!account) {
               throw new Error('Account address is required');
             }
-            
+
             const networkId = await window.ethereum.request({ method: 'net_version' });
             console.log('[Wallet Bridge] Current network ID:', networkId);
-            
+
             let balance;
             if (tokenSymbol === 'ETH' || tokenSymbol === 'FIL') {
               // Native token balance
@@ -171,7 +171,7 @@
               // ERC-20 token balance using direct contract calls
               const tokenAddress = TOKEN_CONTRACTS[networkId]?.[tokenSymbol];
               console.log('[Wallet Bridge] Token address for', tokenSymbol, ':', tokenAddress);
-              
+
               if (!tokenAddress) {
                 throw new Error(`Token ${tokenSymbol} not supported on network ${networkId}`);
               }
@@ -179,10 +179,10 @@
               // Use direct contract call instead of ethers.js
               const balanceOfData = '0x70a08231' + account.slice(2).padStart(64, '0');
               const decimalsData = '0x313ce567';
-              
+
               console.log('[Wallet Bridge] Calling balanceOf with data:', balanceOfData);
               console.log('[Wallet Bridge] Calling decimals with data:', decimalsData);
-              
+
               try {
                 const [balanceHex, decimalsHex] = await Promise.all([
                   window.ethereum.request({
@@ -242,7 +242,7 @@
               method: 'wallet_switchEthereumChain',
               params: [{ chainId: '0xaa36a7' }], // Sepolia chain ID
             });
-            
+
             result = { success: true, message: 'Switched to Sepolia network' };
           } catch (err) {
             if (err.code === 4902) {
@@ -282,7 +282,7 @@
               method: 'wallet_switchEthereumChain',
               params: [{ chainId: '0x4cb2f' }], // Filecoin Calibration chain ID
             });
-            
+
             result = { success: true, message: 'Switched to Filecoin Calibration network' };
           } catch (err) {
             if (err.code === 4902) {
@@ -320,14 +320,14 @@
           try {
             const { productData, paymentMethod, walletAddress } = event.data;
             console.log('[Wallet Bridge] Processing payment:', { productData, paymentMethod, walletAddress });
-            
+
             // Contract configuration
             const CONFIG = {
               PYUSD: '0xCaC524BcA292aaade2DF8A05cC58F0a65B1B3bB9',
               PaymentProcessor: '0x210c251e5a39bd12234d3564ce61168c1bec5922',
               merchantWallet: '0x286bd33A27079f28a4B4351a85Ad7f23A04BDdfC'
             };
-            
+
             console.log('[Wallet Bridge] Using contract addresses:');
             console.log('[Wallet Bridge] PYUSD:', CONFIG.PYUSD);
             console.log('[Wallet Bridge] PaymentProcessor:', CONFIG.PaymentProcessor);
@@ -345,11 +345,11 @@
                 method: 'eth_getCode',
                 params: [CONFIG.PaymentProcessor, 'latest']
               });
-              
+
               if (code === '0x' || code === '0x0') {
                 throw new Error('PaymentProcessor contract not deployed at the specified address');
               }
-              
+
               console.log('[Wallet Bridge] PaymentProcessor contract verified at:', CONFIG.PaymentProcessor);
             } catch (contractError) {
               console.error('[Wallet Bridge] Contract verification failed:', contractError);
@@ -361,11 +361,11 @@
               method: 'eth_getBalance',
               params: [walletAddress, 'latest']
             });
-            
+
             const ethBalanceWei = parseInt(ethBalance, 16);
             const ethBalanceEth = ethBalanceWei / Math.pow(10, 18);
             console.log('[Wallet Bridge] ETH balance for gas:', ethBalanceEth, 'ETH');
-            
+
             if (ethBalanceWei < 1000000000000000) { // 0.001 ETH minimum
               throw new Error(`Insufficient ETH for gas fees. You have ${ethBalanceEth.toFixed(6)} ETH but need at least 0.001 ETH for transaction fees.`);
             }
@@ -375,10 +375,10 @@
             if (productData.price) {
               const priceStr = productData.price.toString();
               console.log('[Wallet Bridge] Original price string:', priceStr);
-              
+
               const numericPrice = parseFloat(priceStr.replace(/[^\d.]/g, ''));
               console.log('[Wallet Bridge] Parsed numeric price:', numericPrice);
-              
+
               if (!isNaN(numericPrice)) {
                 if (priceStr.includes('₹')) {
                   // INR to USD conversion (1 INR = 0.012 USD)
@@ -395,11 +395,11 @@
                 }
               }
             }
-            
+
             console.log('[Wallet Bridge] Final USD amount:', usdAmount);
 
             const amountInUnits = Math.floor(parseFloat(usdAmount) * 1000000).toString();
-            
+
             // Upload receipt to Lighthouse
             const receiptData = {
               productId: productData.productId || productData.url || 'unknown',
@@ -420,11 +420,11 @@
             try {
               console.log('[Wallet Bridge] Uploading receipt to Lighthouse...');
               console.log('[Wallet Bridge] Receipt data:', receiptData);
-              
+
               // Add timeout to the fetch request
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
-              
+
               const lighthouseResponse = await fetch('https://node.lighthouse.storage/api/v0/add', {
                 method: 'POST',
                 headers: {
@@ -446,7 +446,7 @@
               console.log('[Wallet Bridge] Receipt uploaded successfully to Lighthouse!');
               console.log('[Wallet Bridge] Receipt CID:', receiptCid);
               console.log('[Wallet Bridge] Receipt URL:', `https://gateway.lighthouse.storage/ipfs/${receiptCid}`);
-              
+
             } catch (lighthouseError) {
               console.warn('[Wallet Bridge] Lighthouse upload failed, using fallback CID:', lighthouseError.message);
               // Generate a fallback CID for testing
@@ -457,10 +457,10 @@
             // Check current allowance
             let allowance = 0;
             try {
-              const allowanceData = '0xdd62ed3e' + 
-                walletAddress.slice(2).padStart(64, '0') + 
+              const allowanceData = '0xdd62ed3e' +
+                walletAddress.slice(2).padStart(64, '0') +
                 CONFIG.PaymentProcessor.slice(2).padStart(64, '0');
-              
+
               const currentAllowance = await window.ethereum.request({
                 method: 'eth_call',
                 params: [{ to: CONFIG.PYUSD, data: allowanceData }, 'latest']
@@ -478,7 +478,7 @@
             if (allowance < requiredAmount) {
               console.log('[Wallet Bridge] Requesting PYUSD approval...');
               console.log('[Wallet Bridge] Required amount:', requiredAmount, 'Current allowance:', allowance);
-              
+
               try {
                 // First check if user has enough PYUSD balance
                 const balanceData = '0x70a08231' + walletAddress.slice(2).padStart(64, '0');
@@ -486,21 +486,21 @@
                   method: 'eth_call',
                   params: [{ to: CONFIG.PYUSD, data: balanceData }, 'latest']
                 });
-                
+
                 const userBalance = parseInt(balanceResponse, 16);
                 console.log('[Wallet Bridge] User PYUSD balance:', userBalance);
-                
+
                 if (userBalance < requiredAmount) {
                   throw new Error(`Insufficient PYUSD balance. You have ${userBalance / 1000000} PYUSD but need ${requiredAmount / 1000000} PYUSD`);
                 }
-                
-                const approveData = '0x095ea7b3' + 
-                  CONFIG.PaymentProcessor.slice(2).padStart(64, '0') + 
+
+                const approveData = '0x095ea7b3' +
+                  CONFIG.PaymentProcessor.slice(2).padStart(64, '0') +
                   amountInUnits.padStart(64, '0');
-                
+
                 console.log('[Wallet Bridge] Approval data:', approveData);
                 console.log('[Wallet Bridge] PaymentProcessor address:', CONFIG.PaymentProcessor);
-                
+
                 // Estimate gas for the approval transaction
                 let gasEstimate;
                 try {
@@ -536,12 +536,12 @@
                 });
 
                 console.log('[Wallet Bridge] Approval transaction sent:', approveTx);
-                
+
                 // Wait for approval confirmation with longer timeout
                 await new Promise((resolve, reject) => {
                   let attempts = 0;
                   const maxAttempts = 30; // 60 seconds total
-                  
+
                   const checkInterval = setInterval(async () => {
                     attempts++;
                     try {
@@ -570,9 +570,9 @@
                     }
                   }, 2000);
                 });
-                
+
                 console.log('[Wallet Bridge] Approval completed successfully');
-                
+
               } catch (approvalError) {
                 console.warn('[Wallet Bridge] Approval failed, proceeding anyway:', approvalError.message);
                 // Continue with payment attempt - user might have sufficient allowance from previous transaction
@@ -581,10 +581,10 @@
 
             // Check allowance again after approval
             try {
-              const allowanceData = '0xdd62ed3e' + 
-                walletAddress.slice(2).padStart(64, '0') + 
+              const allowanceData = '0xdd62ed3e' +
+                walletAddress.slice(2).padStart(64, '0') +
                 CONFIG.PaymentProcessor.slice(2).padStart(64, '0');
-              
+
               const currentAllowance = await window.ethereum.request({
                 method: 'eth_call',
                 params: [{ to: CONFIG.PYUSD, data: allowanceData }, 'latest']
@@ -592,7 +592,7 @@
 
               const newAllowance = parseInt(currentAllowance, 16);
               console.log('[Wallet Bridge] Allowance after approval:', newAllowance);
-              
+
               if (newAllowance < requiredAmount) {
                 throw new Error(`Insufficient allowance after approval. Have ${newAllowance / 1000000} PYUSD but need ${requiredAmount / 1000000} PYUSD`);
               }
@@ -604,17 +604,17 @@
             console.log('[Wallet Bridge] Processing payment through PaymentProcessor...');
             console.log('[Wallet Bridge] Amount in units:', amountInUnits);
             console.log('[Wallet Bridge] Receipt CID:', receiptCid);
-            
+
             try {
               // For now, let's use a simpler approach and just transfer PYUSD directly
               // This bypasses the PaymentProcessor contract complexity
               console.log('[Wallet Bridge] Using direct PYUSD transfer approach...');
-              
+
               // Transfer PYUSD directly from user to merchant wallet
               const transferData = '0xa9059cbb' + // transfer(address,uint256) function selector
                 CONFIG.merchantWallet.slice(2).padStart(64, '0') + // merchant wallet address
                 amountInUnits.padStart(64, '0'); // amount in units
-              
+
               console.log('[Wallet Bridge] Transfer data:', transferData);
               console.log('[Wallet Bridge] Transferring to merchant wallet:', CONFIG.merchantWallet);
 
@@ -653,12 +653,12 @@
               });
 
               console.log('[Wallet Bridge] Payment transaction sent:', paymentTx);
-              
+
               // Wait for payment confirmation
               const paymentReceipt = await new Promise((resolve, reject) => {
                 let attempts = 0;
                 const maxAttempts = 30; // 60 seconds total
-                
+
                 const checkInterval = setInterval(async () => {
                   attempts++;
                   try {
@@ -713,28 +713,8 @@
 
             } catch (paymentError) {
               console.error('[Wallet Bridge] Payment processing failed:', paymentError);
-              
-              // Return a mock success for testing purposes
-              const mockResult = {
-                success: true,
-                txHash: '0x' + Math.random().toString(16).substring(2, 66),
-                amountPaid: usdAmount,
-                currency: 'PYUSD',
-                receiptId: '1',
-                receiptCid: receiptCid,
-                receiptUrl: `https://gateway.lighthouse.storage/ipfs/${receiptCid}`,
-                productData: productData,
-                paymentMethod: 'PYUSD',
-                blockNumber: Math.floor(Math.random() * 1000000) + 1000000,
-                merchantWallet: CONFIG.merchantWallet
-              };
-
-              console.log('[Wallet Bridge] Using mock payment result for testing:', mockResult);
-
-              result = {
-                success: true,
-                result: mockResult
-              };
+              // FIX H8: do NOT return a fake success — propagate the real error
+              throw new Error(`Payment failed: ${paymentError.message}`);
             }
 
           } catch (paymentError) {
@@ -777,7 +757,7 @@
     }
 
     const balances = {};
-    
+
     for (const [tokenName, contractAddress] of Object.entries(tokens)) {
       try {
         // ERC-20 balanceOf function
@@ -792,7 +772,7 @@
         // Convert hex to decimal (PYUSD and USDC have 6 decimals)
         const decimals = (tokenName === 'USDC' || tokenName === 'PYUSD') ? 6 : 18;
         const balanceDecimal = parseInt(balance, 16) / Math.pow(10, decimals);
-        
+
         balances[tokenName] = {
           balance: balanceDecimal,
           contractAddress: contractAddress,

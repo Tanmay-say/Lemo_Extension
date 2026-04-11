@@ -7,12 +7,13 @@ export function injectEthereumAccess() {
   // Check if we're in an extension context
   if (typeof window === 'undefined' || typeof chrome === 'undefined') {
     return null;
+  } // FIX C7: missing closing brace was here
 
   // If we're in page context, return window.ethereum directly
   if (typeof window.ethereum !== 'undefined') {
     return window.ethereum;
   }
-  
+
   // Otherwise, we need to access it via postMessage
   return null;
 }
@@ -39,7 +40,7 @@ export async function getPageEthereum() {
       script.src = chrome.runtime.getURL('src/content/walletBridge.js');
       script.setAttribute('data-lemo-wallet-bridge', 'true');
       document.head.appendChild(script);
-      
+
       script.onload = () => {
         const checkEthereum = () => {
           if (typeof window.ethereum !== 'undefined') {

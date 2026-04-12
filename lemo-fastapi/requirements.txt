@@ -1,32 +1,30 @@
-fastapi
-prisma
-uvicorn[standard]
-beautifulsoup4
-sentence_transformers
-ddgs
-python-dotenv
-redis
-numpy
-pydantic
+fastapi==0.115.12
+prisma==0.15.0
+uvicorn[standard]==0.34.0
+beautifulsoup4==4.12.3
+sentence_transformers==3.3.1
+ddgs==9.13.0
+python-dotenv==1.0.1
+redis==5.2.1
+numpy==1.26.4
+pydantic==2.10.5
 
 # Async HTTP client (replaces requests)
-httpx
+httpx==0.28.1
 
 # ScrapingBee client
-scrapingbee
+scrapingbee==2.0.1
 
 # JWT Authentication & SIWE
-pyjwt
-python-jose[cryptography]
-siwe
-eth-account
+pyjwt==2.10.1
+python-jose[cryptography]==3.3.0
+siwe==4.3.0
+eth-account==0.13.7
 
 # Rate limiting
-slowapi
+slowapi==0.1.9
 
-# LLM integrations
-langchain
-langchain_core
-langchain_google_genai
-langchain-openai
-langchain-anthropic
+# LLM integrations (versions auto-resolve compatible langchain-core)
+langchain-google-genai==2.0.5
+langchain-openai==0.3.13
+langchain-anthropic==0.3.2

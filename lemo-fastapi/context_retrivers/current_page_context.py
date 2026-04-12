@@ -30,7 +30,7 @@ async def current_page_context(url: str, query: str):
         for i, chunk in enumerate(chunks):
             try:
                 embedding = generate_embedding(chunk)
-                result = store_page_vector(url, chunk, embedding)
+                result = await store_page_vector(url, chunk, embedding)
                 stored_count += 1
                 if (i + 1) % 5 == 0:  # Log every 5 chunks
                     print(f"[CONTEXT] Processed {i+1}/{len(chunks)} chunks...")
@@ -45,7 +45,7 @@ async def current_page_context(url: str, query: str):
         print("[CONTEXT] ✓ Step 3 SUCCESS: Query embedding generated")
         
         print("[CONTEXT] Step 4: Searching Redis for relevant content...")
-        content = get_relevant_content(url, query_embedding, top_k=5)
+        content = await get_relevant_content(url, query_embedding, top_k=5)
         
         if content and len(content) > 0:
             print(f"[CONTEXT] ✓✓✓ Step 4 SUCCESS: Found {len(content)} relevant chunks")

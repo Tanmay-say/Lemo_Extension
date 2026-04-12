@@ -1,0 +1,95 @@
+# LEMO V3 Audit Fixes Progress
+
+## Fix Status:
+- [✅] FIX 1: NEW-1 - Wire up SIWE authentication (loginWithSIWE not called)
+- [SKIPPED] FIX 2: NEW-2 - Lighthouse/Supabase (keeping existing implementation)
+- [✅] FIX 3: NEW-3 - Add timeout to getPageEthereum()
+- [✅] FIX 4: NEW-4 - Update README with JWT_SECRET_KEY
+- [✅] FIX 5: C8 - Convert Redis to async
+- [✅] FIX 6: H11 - Pin dependency versions
+
+## Detailed Progress:
+
+### FIX 1: NEW-1 ✅ COMPLETED
+- Imported `loginWithSIWE` into WalletConnect.jsx
+- Modified `checkAndAuthenticateUser()` to call SIWE login when user exists
+- Added signMessage function using MetaMask via background messaging
+- JWT token now properly obtained and stored after wallet connection
+- File: /app/lemo-extension/src/components/WalletConnect.jsx
+
+### FIX 2: NEW-2 (SKIPPED per user request)
+Status: Skipped - keeping Lighthouse integration in Supabase as requested
+
+### FIX 3: NEW-3 ✅ COMPLETED
+- Added 10-second timeout guard to `getPageEthereum()` function
+- Promise now rejects with clear error if MetaMask not found within timeout
+- Added timeout cleanup on success to prevent memory leaks
+- Added error handler for script loading failures
+- File: /app/lemo-extension/src/utils/pageEthereum.js
+
+### FIX 4: NEW-4 ✅ COMPLETED
+- Updated backend README.md with JWT_SECRET_KEY environment variable
+- Added clear documentation that JWT_SECRET_KEY is REQUIRED
+- Noted that missing or too-short JWT_SECRET_KEY causes startup crash
+- Provided example value format
+- File: /app/lemo-fastapi/README.md
+
+### FIX 5: C8 ✅ COMPLETED
+- Converted Redis from synchronous to async implementation
+- Changed import from `redis` to `redis.asyncio`
+- Updated ConnectionPool to use AsyncConnectionPool
+- Converted all Redis functions to async/await pattern:
+  - `get_redis_connection()` → `async def get_redis_connection()`
+  - `create_redis_index()` → `async def create_redis_index()`
+  - `store_vector()` → `async def store_vector()`
+  - `search_similar()` → `async def search_similar()`
+  - `store_page_vector()` → `async def store_page_vector()`
+  - `get_relevant_content()` → `async def get_relevant_content()`
+  - `get_chat_history()` → `async def get_chat_history()`
+  - `store_chat_history()` → `async def store_chat_history()`
+  - `delete_chat_history()` → `async def delete_chat_history()`
+  - `add_message_to_chat()` → `async def add_message_to_chat()`
+- Updated all callers to use await:
+  - /app/lemo-fastapi/helpers/add_chats.py
+  - /app/lemo-fastapi/controllers/authentication.py
+  - /app/lemo-fastapi/context_retrivers/product_recommendation.py
+  - /app/lemo-fastapi/context_retrivers/current_page_context.py
+- Added proper connection cleanup with `await r.close()` calls
+- Replaced time.sleep() with asyncio.sleep() for non-blocking waits
+- Files modified:
+  - /app/lemo-fastapi/helpers/redis_functions.py (complete rewrite)
+  - /app/lemo-fastapi/helpers/add_chats.py
+  - /app/lemo-fastapi/controllers/authentication.py
+  - /app/lemo-fastapi/context_retrivers/product_recommendation.py
+  - /app/lemo-fastapi/context_retrivers/current_page_context.py
+
+### FIX 6: H11 ✅ COMPLETED
+- Pinned all Python dependencies to specific versions for reproducible builds
+- Updated /app/lemo-fastapi/requirements.txt with exact version numbers:
+  - fastapi==0.115.12
+  - prisma==0.15.0
+  - uvicorn[standard]==0.34.0
+  - beautifulsoup4==4.12.3
+  - sentence_transformers==3.3.1
+  - ddgs==9.13.0
+  - python-dotenv==1.0.1
+  - redis==5.2.1
+  - numpy==1.26.4
+  - pydantic==2.10.5
+  - httpx==0.28.1
+  - scrapingbee==2.0.1
+  - pyjwt==2.10.1
+  - python-jose[cryptography]==3.3.0
+  - siwe==4.3.0
+  - eth-account==0.13.7
+  - slowapi==0.1.9
+  - langchain-google-genai==2.0.5
+  - langchain-openai==0.3.13
+  - langchain-anthropic==0.3.2
+- Note: langchain-core auto-resolves to compatible version (0.3.84) via dependencies
+- Frontend package.json already has pinned versions with yarn.lock for reproducibility
+- All dependencies verified to install successfully and resolve without conflicts
+- File: /app/lemo-fastapi/requirements.txt
+
+---
+Last updated: FIX 6 completed - All audit fixes complete!

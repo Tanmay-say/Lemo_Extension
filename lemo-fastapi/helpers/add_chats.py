@@ -41,7 +41,7 @@ async def add_chats(session_id: str, message: str, message_type: str, detected_i
         
         # Store message in Redis (best-effort — may fail if Redis is not configured)
         try:
-            result = add_message_to_chat(session_id, message, message_type, detected_intent)
+            result = await add_message_to_chat(session_id, message, message_type, detected_intent)
             if result.get("status") == "error":
                 print(f"[WARNING] Failed to store message in Redis: {result.get('message')}")
         except Exception as redis_err:

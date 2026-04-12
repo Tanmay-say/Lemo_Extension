@@ -34,8 +34,9 @@ async def RequestNonce(req: Request):
         # BUG FIX: store nonce in Redis with 5-minute TTL for later verification
         try:
             from helpers.redis_functions import get_redis_connection
-            r = get_redis_connection()
-            r.setex(f"nonce:{walletAddress.strip().lower()}", 300, nonce)
+            r = await get_redis_connection()
+            await r.setex(f"nonce:{walletAddress.strip().lower()}", 300, nonce)
+            await r.close()
         except Exception as redis_err:
             # Redis may be unconfigured in dev — log and continue. Nonce won't be verifiable.
             print(f"[AUTH WARNING] Could not store nonce in Redis: {redis_err}")
@@ -97,8 +98,8 @@ async def AuthenticateUser(req: Request):
         # BUG FIX: verify stored nonce (replay attack prevention)
         try:
             from helpers.redis_functions import get_redis_connection
-            r = get_redis_connection()
-            stored_nonce = r.get(f"nonce:{normalizedWalletAddress}")
+            r = await get_redis_connection()
+            stored_nonce = await r.get(f"nonce:{normalizedWalletAddress}")
             if stored_nonce:
                 # Parse the nonce from the SIWE message (line starting with "Nonce: ")
                 nonce_in_message = None
@@ -108,14 +109,16 @@ async def AuthenticateUser(req: Request):
                         break
                 stored_nonce_str = stored_nonce.decode() if isinstance(stored_nonce, bytes) else stored_nonce
                 if nonce_in_message != stored_nonce_str:
+                    await r.close()
                     return JSONResponse(
                         status_code=401,
                         content={"success": False, "error": "Invalid or expired nonce"}
                     )
                 # One-time use — delete immediately after verification
-                r.delete(f"nonce:{normalizedWalletAddress}")
+                await r.delete(f"nonce:{normalizedWalletAddress}")
             else:
                 print(f"[AUTH WARNING] No stored nonce found for {normalizedWalletAddress} — skipping nonce check")
+            await r.close()
         except Exception as redis_err:
             print(f"[AUTH WARNING] Redis nonce verification skipped: {redis_err}")
         

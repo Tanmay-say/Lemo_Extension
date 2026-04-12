@@ -83,9 +83,16 @@ Create a `.env` file in your project root with the following required variables:
 
 ```ini
 REDIS_URL=redis://localhost:6379/0
+JWT_SECRET_KEY=your-secret-jwt-key-min-32-chars
 GEMINI_API_KEY=your-gemini-api-key
 DATABASE_URL=postgresql://user:password@localhost:5432/yourdb
 ```
+**Important Notes:**
+
+- `DATABASE_URL`: PostgreSQL connection string for the database
+- `REDIS_URL`: Redis server URL for caching and session storage
+- `GEMINI_API_KEY`: Your Gemini API key for LLM functionality
+- `JWT_SECRET_KEY`: **REQUIRED** - Secret key for JWT token generation and validation. Must be at least 32 characters. The application will crash at startup if this is missing or too short. Example: `your-very-secure-secret-key-at-least-32-characters-long`
 
 - Adjust values according to your infrastructure.
 - Make sure your database and Redis are accessible as per these configurations.

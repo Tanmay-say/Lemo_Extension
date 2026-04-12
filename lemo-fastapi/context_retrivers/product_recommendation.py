@@ -14,7 +14,7 @@ async def product_recommendation(domain: str, user_query: str):
     
     # Ensure Redis index exists before storing/searching
     try:
-        create_redis_index()
+        await create_redis_index()
     except Exception as e:
         print(f"[ERROR] Failed to create/verify Redis index: {e}")
         return set()
@@ -46,7 +46,7 @@ async def product_recommendation(domain: str, user_query: str):
             print(f"[LOG] Generating embedding for chunk")
             embedding = generate_embedding(product_url + " " + chunk)
             print(f"[LOG] Storing vector for {product_url}")
-            result = store_vector(product_url, embedding)
+            result = await store_vector(product_url, embedding)
             if result.get("status") != "success":
                 print(f"[WARNING] Failed to store vector: {result.get('message')}")
         except Exception as e:
@@ -61,7 +61,7 @@ async def product_recommendation(domain: str, user_query: str):
         # Note: Requesting top 10 but only stored 4 new products
         # This may return old/unrelated products from Redis if they exist
         print(f"[LOG] Searching for similar products (top 10)")
-        similar_products = search_similar(query_embedding, 10)
+        similar_products = await search_similar(query_embedding, 10)
         print(f"[LOG] Found {len(similar_products)} similar products")
         
         # Use generator expression instead of list comprehension in set()

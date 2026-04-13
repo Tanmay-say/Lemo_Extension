@@ -5,6 +5,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from controllers.query_handler import query_handler
+from core.config import llm_provider_preference, llm_keys
 from routes.authentication_routes import router as authentication_routes
 from routes.session_routes import router as session_routes
 import os
@@ -18,13 +19,23 @@ limiter = Limiter(key_func=get_remote_address)
 async def lifespan(app: FastAPI):
     """Lifespan context manager (replaces deprecated @app.on_event)."""
     # Startup
+    configured_providers = []
+    if llm_keys.gemini:
+        configured_providers.append("Gemini")
+    if llm_keys.emergent:
+        configured_providers.append("Emergent")
+    provider_summary = ", ".join(configured_providers) if configured_providers else "none"
+
     print("="*80)
     print("🚀 Starting Lemo FastAPI Server")
     print("="*80)
     print("✓ Rate limiting enabled")
     print("✓ SIWE authentication configured")
     print("✓ ScrapingBee scraper ready")
-    print("✓ Dual LLM support (Gemini + Emergent)")
+    print(f"✓ LLM providers configured: {provider_summary}")
+    print(f"✓ LLM provider preference: {llm_provider_preference()}")
+    if os.getenv("UVICORN_RELOAD") == "true":
+        print("ℹ Development reload is enabled; startup logs can appear more than once")
     print("="*80)
     yield
     # Shutdown

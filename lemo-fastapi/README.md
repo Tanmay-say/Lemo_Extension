@@ -86,12 +86,14 @@ REDIS_URL=redis://localhost:6379/0
 JWT_SECRET_KEY=your-secret-jwt-key-min-32-chars
 GEMINI_API_KEY=your-gemini-api-key
 DATABASE_URL=postgresql://user:password@localhost:5432/yourdb
+LLM_PROVIDER=auto
 ```
 **Important Notes:**
 
 - `DATABASE_URL`: PostgreSQL connection string for the database
 - `REDIS_URL`: Redis server URL for caching and session storage
 - `GEMINI_API_KEY`: Your Gemini API key for LLM functionality
+- `LLM_PROVIDER`: Optional. Use `gemini`, `emergent`, or `auto` (default). If your Emergent endpoint is unreachable, set `LLM_PROVIDER=gemini` and configure a valid `GEMINI_API_KEY`.
 - `JWT_SECRET_KEY`: **REQUIRED** - Secret key for JWT token generation and validation. Must be at least 32 characters. The application will crash at startup if this is missing or too short. Example: `your-very-secure-secret-key-at-least-32-characters-long`
 
 - Adjust values according to your infrastructure.
@@ -110,7 +112,7 @@ python run.py
 The FastAPI app will be available at: `http://localhost:8000`
 
 - The main app entrypoint is in `main.py`.
-- The auto-reload server is used for local development.
+- The auto-reload server is used for local development. In reload mode the startup banner can appear more than once because uvicorn runs a watcher process and a worker process.
 
 ---
 

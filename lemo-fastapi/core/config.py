@@ -77,6 +77,27 @@ def emergent_base_url() -> str:
     return _clean_env_value("EMERGENT_BASE_URL", "https://api.emergent.ai/v1")
 
 
+def llm_provider_preference() -> str:
+    value = _clean_env_value("LLM_PROVIDER", "auto").lower()
+    return value if value in {"auto", "gemini", "emergent"} else "auto"
+
+
+def llm_request_timeout() -> float:
+    value = _clean_env_value("LLM_TIMEOUT_SECONDS", "30")
+    try:
+        return max(5.0, float(value))
+    except ValueError:
+        return 30.0
+
+
+def llm_max_retries() -> int:
+    value = _clean_env_value("LLM_MAX_RETRIES", "2")
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return 2
+
+
 def chat_model_name() -> str:
     for key in ("EMERGENT_MODEL", "GEMINI_MODEL", "LLM_MODEL"):
         value = _clean_env_value(key)

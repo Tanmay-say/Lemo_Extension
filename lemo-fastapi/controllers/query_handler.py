@@ -4,6 +4,12 @@ from helpers.intent_detection import intent_detection
 from cases.asking import asking, current_page_asking
 from helpers.get_session_details import get_session_details
 from helpers.add_chats import add_chats
+from helpers.llm_config import (
+    LLMConfigurationError,
+    LLMServiceUnavailableError,
+    normalize_llm_exception,
+    user_facing_llm_message,
+)
 from dependencies.auth import get_optional_user
 import logging
 
@@ -91,7 +97,22 @@ async def query_handler(request: Request):
             content={"success": False, "message": "Invalid request data"}, 
             status_code=400
         )
+    except (LLMConfigurationError, LLMServiceUnavailableError) as e:
+        logger.error(f"LLM error in query_handler: {e}")
+        status_code = 503 if isinstance(e, LLMServiceUnavailableError) else 500
+        return JSONResponse(
+            content={"success": False, "message": user_facing_llm_message(e)},
+            status_code=status_code
+        )
     except Exception as e:
+        normalized = normalize_llm_exception(e)
+        if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
+            logger.error(f"Normalized LLM error in query_handler: {normalized}")
+            status_code = 503 if isinstance(normalized, LLMServiceUnavailableError) else 500
+            return JSONResponse(
+                content={"success": False, "message": user_facing_llm_message(normalized)},
+                status_code=status_code
+            )
         logger.error(f"Unexpected error in query_handler: {e}", exc_info=True)
         # Never expose internal error details to users
         return JSONResponse(

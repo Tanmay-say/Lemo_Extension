@@ -14,6 +14,35 @@ import secrets
 from helpers.dev_store import create_or_update_user, get_user, use_dev_store
 
 
+NONCE_TTL_SECONDS = 300
+
+
+async def _store_nonce(wallet_address: str, nonce: str) -> None:
+    from helpers.redis_functions import get_redis_connection
+
+    r = await get_redis_connection()
+    try:
+        nonce_key = f"nonce:{wallet_address}"
+        await r.sadd(nonce_key, nonce)
+        await r.expire(nonce_key, NONCE_TTL_SECONDS)
+    finally:
+        await r.close()
+
+
+async def _consume_nonce(wallet_address: str, nonce: str) -> bool:
+    from helpers.redis_functions import get_redis_connection
+
+    r = await get_redis_connection()
+    try:
+        nonce_key = f"nonce:{wallet_address}"
+        is_valid = await r.sismember(nonce_key, nonce)
+        if is_valid:
+            await r.srem(nonce_key, nonce)
+        return bool(is_valid)
+    finally:
+        await r.close()
+
+
 async def GetUserStatus(req: Request):
     """Check whether a wallet address is registered and active."""
     try:
@@ -107,12 +136,10 @@ async def RequestNonce(req: Request):
         )
         message_str = siwe_msg.prepare_message()
 
-        # Store nonce in Redis with 5-minute TTL for replay-attack prevention
+        # Store nonce in Redis with 5-minute TTL for replay-attack prevention.
+        # Keep multiple valid nonces briefly to tolerate duplicate frontend auth flows.
         try:
-            from helpers.redis_functions import get_redis_connection
-            r = await get_redis_connection()
-            await r.setex(f"nonce:{normalizedAddress.lower()}", 300, nonce)
-            await r.close()
+            await _store_nonce(normalizedAddress.lower(), nonce)
         except Exception as redis_err:
             # Redis may be unconfigured in dev — log and continue.
             print(f"[AUTH WARNING] Could not store nonce in Redis: {redis_err}")
@@ -165,36 +192,29 @@ async def AuthenticateUser(req: Request):
             )
         
         normalizedWalletAddress = walletAddress.strip().lower()
+        normalizedMessage = message.strip()
+        parsed_message = SiweMessage.from_message(message=normalizedMessage)
         
-        # BUG FIX: verify stored nonce (replay attack prevention)
+        # Verify stored nonce (replay attack prevention)
         try:
-            from helpers.redis_functions import get_redis_connection
-            r = await get_redis_connection()
-            stored_nonce = await r.get(f"nonce:{normalizedWalletAddress}")
-            if stored_nonce:
-                # Parse the nonce from the SIWE message (line starting with "Nonce: ")
-                nonce_in_message = None
-                for line in message.splitlines():
-                    if line.startswith("Nonce: "):
-                        nonce_in_message = line[len("Nonce: "):].strip()
-                        break
-                stored_nonce_str = stored_nonce.decode() if isinstance(stored_nonce, bytes) else stored_nonce
-                if nonce_in_message != stored_nonce_str:
-                    await r.close()
+            nonce_in_message = parsed_message.nonce
+            if nonce_in_message:
+                nonce_ok = await _consume_nonce(normalizedWalletAddress, nonce_in_message)
+                if not nonce_ok:
                     return JSONResponse(
                         status_code=401,
                         content={"success": False, "error": "Invalid or expired nonce"}
                     )
-                # One-time use — delete immediately after verification
-                await r.delete(f"nonce:{normalizedWalletAddress}")
             else:
-                print(f"[AUTH WARNING] No stored nonce found for {normalizedWalletAddress} — skipping nonce check")
-            await r.close()
+                return JSONResponse(
+                    status_code=401,
+                    content={"success": False, "error": "Invalid SIWE message nonce"}
+                )
         except Exception as redis_err:
             print(f"[AUTH WARNING] Redis nonce verification skipped: {redis_err}")
         
         # Verify SIWE signature
-        is_valid = await verify_siwe_signature(message, signature, normalizedWalletAddress)
+        is_valid = await verify_siwe_signature(normalizedMessage, signature, normalizedWalletAddress)
         
         if not is_valid:
             return JSONResponse(

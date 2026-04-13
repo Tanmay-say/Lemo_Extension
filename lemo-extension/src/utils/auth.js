@@ -1,6 +1,8 @@
 // Authentication utilities for LEMO Extension
 // Implements proper SIWE → JWT flow
 
+const siweLoginPromises = new Map();
+
 /**
  * Get the configured backend URL from storage
  * @returns {Promise<string>} Backend URL
@@ -110,7 +112,14 @@ export const checkUserExists = async (walletAddress) => {
  * @returns {Promise<{success: boolean, token?: string, user?: object, error?: string}>}
  */
 export const loginWithSIWE = async (walletAddress, signMessage) => {
-  try {
+  const normalizedWallet = walletAddress?.toLowerCase?.() || walletAddress;
+
+  if (normalizedWallet && siweLoginPromises.has(normalizedWallet)) {
+    return siweLoginPromises.get(normalizedWallet);
+  }
+
+  const loginPromise = (async () => {
+    try {
     const backendUrl = await getBackendUrl();
 
     // Step 1: request nonce
@@ -145,10 +154,21 @@ export const loginWithSIWE = async (walletAddress, signMessage) => {
     await saveConnectedWallet(walletAddress);
     console.log('[AUTH] Login successful, JWT stored.');
     return { success: true, token, user: loginData.data?.user };
-  } catch (error) {
-    console.error('[AUTH] SIWE login failed:', error);
-    return { success: false, error: error.message };
+    } catch (error) {
+      console.error('[AUTH] SIWE login failed:', error);
+      return { success: false, error: error.message };
+    } finally {
+      if (normalizedWallet) {
+        siweLoginPromises.delete(normalizedWallet);
+      }
+    }
+  })();
+
+  if (normalizedWallet) {
+    siweLoginPromises.set(normalizedWallet, loginPromise);
   }
+
+  return loginPromise;
 };
 
 /**

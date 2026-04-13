@@ -4,7 +4,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from prompts.currentpage_asking import currentpage_asking_prompt
 from prompts.product_recommendation_prompt import product_recommendation_prompt
 from prompts.chat_history_responce_prompt import chat_history_response_prompt
-from helpers.llm_config import get_llm_for_task
+from helpers.llm_config import get_llm_for_task, normalize_llm_exception
 
 
 def _get_asking_llm():
@@ -83,6 +83,9 @@ async def current_page_asking(user_query: str, current_page_url: str):
         return answer
     
     except Exception as e:
+        normalized = normalize_llm_exception(e)
+        if normalized is not e:
+            raise normalized
         print(f"[ERROR] Error in current_page_asking: {e}")
         import traceback
         traceback.print_exc()
@@ -104,6 +107,9 @@ async def product_asking(user_query: str, domain: str):
         return answer
     
     except Exception as e:
+        normalized = normalize_llm_exception(e)
+        if normalized is not e:
+            raise normalized
         print(f"[ERROR] Error in product_asking: {e}")
         import traceback
         traceback.print_exc()
@@ -111,12 +117,21 @@ async def product_asking(user_query: str, domain: str):
 
 
 async def chat_history_asking(user_query: str, chat_history: str):
-    prompt = chat_history_response_prompt(user_query, chat_history)
-    messages = [SystemMessage(content=prompt), HumanMessage(content=user_query)]
-    response = await _get_asking_llm().ainvoke(messages)
-    answer = response.content if response and response.content else "I couldn't generate a response. Please try again."
-    print(f"[LOG] Generated answer: {answer[:100]}...")
-    return answer
+    try:
+        prompt = chat_history_response_prompt(user_query, chat_history)
+        messages = [SystemMessage(content=prompt), HumanMessage(content=user_query)]
+        response = await _get_asking_llm().ainvoke(messages)
+        answer = response.content if response and response.content else "I couldn't generate a response. Please try again."
+        print(f"[LOG] Generated answer: {answer[:100]}...")
+        return answer
+    except Exception as e:
+        normalized = normalize_llm_exception(e)
+        if normalized is not e:
+            raise normalized
+        print(f"[ERROR] Error in chat_history_asking: {e}")
+        import traceback
+        traceback.print_exc()
+        return "I encountered an error while processing your chat history question. Please try again."
 
 
 async def asking(user_query: str, domain: str, current_page_url: str, scope: str, session_id: str, chat_history: str):

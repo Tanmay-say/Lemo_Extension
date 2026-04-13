@@ -47,8 +47,10 @@ async def verify_siwe_signature(message: str, signature: str, wallet_address: st
         True if signature is valid, False otherwise
     """
     try:
+        normalized_message = message.strip()
+
         # Parse EIP-4361 SIWE message
-        siwe_message = SiweMessage.from_message(message=message)
+        siwe_message = SiweMessage.from_message(message=normalized_message)
         
         # Verify the message was signed by the claimed address
         siwe_message.verify(signature=signature)
@@ -67,7 +69,7 @@ async def verify_siwe_signature(message: str, signature: str, wallet_address: st
         
         return True
     except Exception as e:
-        print(f"[AUTH] SIWE verification failed: {e}")
+        print(f"[AUTH] SIWE verification failed ({type(e).__name__}): {e}")
         return False
 
 

@@ -5,7 +5,7 @@ Implements proper wallet-based authentication with signature verification
 from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from core.database import prisma
@@ -39,27 +39,30 @@ async def verify_siwe_signature(message: str, signature: str, wallet_address: st
     Verify SIWE signature
     
     Args:
-        message: The SIWE message that was signed
+        message: The EIP-4361 SIWE message that was signed
         signature: The signature from the wallet
-        wallet_address: The claimed wallet address
+        wallet_address: The claimed wallet address (lowercased)
         
     Returns:
         True if signature is valid, False otherwise
     """
     try:
-        # Parse SIWE message
+        # Parse EIP-4361 SIWE message
         siwe_message = SiweMessage.from_message(message=message)
         
         # Verify the message was signed by the claimed address
         siwe_message.verify(signature=signature)
         
-        # Check that the wallet address matches
+        # Check that the wallet address matches (case-insensitive)
         if siwe_message.address.lower() != wallet_address.lower():
+            print(f"[AUTH] SIWE address mismatch: {siwe_message.address} vs {wallet_address}")
             return False
         
-        # Check message hasn't expired
+        # Check message hasn't expired (use timezone-aware datetime to avoid TypeError)
         if siwe_message.expiration_time:
-            if datetime.fromisoformat(siwe_message.expiration_time.replace('Z', '+00:00')) < datetime.now():
+            expiry = datetime.fromisoformat(siwe_message.expiration_time.replace('Z', '+00:00'))
+            if expiry < datetime.now(timezone.utc):
+                print(f"[AUTH] SIWE message expired at {expiry}")
                 return False
         
         return True

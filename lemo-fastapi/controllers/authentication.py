@@ -6,7 +6,8 @@ from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from core.database import prisma, get_prisma
 from dependencies.auth import create_access_token, verify_siwe_signature
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from siwe import SiweMessage
 import json
 import secrets
 
@@ -83,28 +84,45 @@ async def RequestNonce(req: Request):
                 }
             )
         
-        # Generate a cryptographically secure random nonce
-        nonce = secrets.token_urlsafe(32)
+        # Generate a cryptographically secure random nonce (alphanumeric, min 8 chars per EIP-4361)
+        nonce = secrets.token_hex(16)  # 32 hex chars, fully alphanumeric
         
-        # BUG FIX: store nonce in Redis with 5-minute TTL for later verification
+        # SiweMessage requires EIP-55 checksum address (mixed-case), not lowercase
+        from web3 import Web3
+        normalizedAddress = Web3.to_checksum_address(walletAddress.strip())
+        now = datetime.now(timezone.utc)
+        expiry = now + timedelta(minutes=5)
+
+        # Build a valid EIP-4361 SIWE message so the backend can verify it properly
+        siwe_msg = SiweMessage(
+            domain="localhost",
+            address=normalizedAddress,
+            statement="Sign in to Lemo AI Assistant",
+            uri="http://localhost:8000",
+            version="1",
+            chain_id=11155111,  # Sepolia
+            nonce=nonce,
+            issued_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expiration_time=expiry.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        message_str = siwe_msg.prepare_message()
+
+        # Store nonce in Redis with 5-minute TTL for replay-attack prevention
         try:
             from helpers.redis_functions import get_redis_connection
             r = await get_redis_connection()
-            await r.setex(f"nonce:{walletAddress.strip().lower()}", 300, nonce)
+            await r.setex(f"nonce:{normalizedAddress.lower()}", 300, nonce)
             await r.close()
         except Exception as redis_err:
-            # Redis may be unconfigured in dev — log and continue. Nonce won't be verifiable.
+            # Redis may be unconfigured in dev — log and continue.
             print(f"[AUTH WARNING] Could not store nonce in Redis: {redis_err}")
-        
-        # BUG FIX: use datetime.utcnow().isoformat() — not the timedelta class itself
-        timestamp = datetime.utcnow().isoformat()
         
         return JSONResponse(
             status_code=200,
             content={
                 "success": True,
                 "nonce": nonce,
-                "message": f"Sign this message to authenticate with Lemo:\n\nWallet: {walletAddress}\nNonce: {nonce}\nTimestamp: {timestamp}"
+                "message": message_str
             }
         )
     except Exception as error:

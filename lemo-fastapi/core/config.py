@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -31,7 +32,38 @@ llm_keys = LLMKeys()
 
 
 def database_configured() -> bool:
-    return not is_placeholder(_clean_env_value("DATABASE_URL"))
+    """Return True only if DATABASE_URL is set AND the Prisma engine is available.
+
+    Set USE_DEV_STORE=true in .env to force the JSON file fallback regardless.
+    """
+    # Explicit override: respect USE_DEV_STORE env var
+    if _clean_env_value("USE_DEV_STORE", "").lower() in ("1", "true", "yes"):
+        return False
+    if is_placeholder(_clean_env_value("DATABASE_URL")):
+        return False
+    # Guard: check that the Prisma query engine exists in any of the known cache patterns
+    try:
+        import glob
+        cache_patterns = [
+            # binary engine (openssl 1.x / 3.0.x)
+            str(Path.home() / ".cache" / "prisma-python" / "binaries" / "*" / "*" / "prisma-query-engine-*"),
+            str(Path(__file__).parent.parent / "prisma-query-engine-*"),
+            # library engine (.so.node) — fetched on openssl 3.x systems
+            str(Path.home() / ".cache" / "prisma-python" / "binaries" / "*" / "*" / "node_modules" / "@prisma" / "engines" / "libquery_engine-*.so.node"),
+        ]
+        if not any(glob.glob(p) for p in cache_patterns):
+            print(
+                "[CONFIG] Prisma engine not found in cache. "
+                "Run `prisma py fetch` then restart. Falling back to dev-store."
+            )
+            return False
+    except Exception as _err:
+        print(f"[CONFIG] Could not check Prisma engine: {_err}. Falling back to dev-store.")
+        return False
+    return True
+
+
+
 
 
 def jwt_secret_key() -> str:

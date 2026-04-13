@@ -63,30 +63,31 @@ export const getAuthHeader = async () => {
 };
 
 /**
- * Check if a user exists — uses GET /auth/nonce/{wallet} as a proxy check
- * Backend has no dedicated GET /auth/{wallet} endpoint.
- * We attempt to fetch a nonce; 200 = wallet known to the server, 404 = not registered.
+ * Check if a user exists and is active.
  * @param {string} walletAddress - The user's wallet address
  * @returns {Promise<{exists: boolean, user?: object, error?: string, isInactive?: boolean}>}
  */
 export const checkUserExists = async (walletAddress) => {
   try {
     const backendUrl = await getBackendUrl();
-    // FIX C3: correct endpoint is /auth/nonce/{walletAddress}
-    const response = await fetch(`${backendUrl}/auth/nonce/${walletAddress}`, {
+    const response = await fetch(`${backendUrl}/auth/user/${walletAddress}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
 
     if (response.ok) {
-      // Nonce endpoint returned 200 → server is reachable. Actual user-existence
-      // is determined during login (404 if not registered, 200 if registered).
-      return { exists: true };
+      const data = await response.json().catch(() => ({}));
+      return { exists: true, user: data.user };
     } else if (response.status === 404) {
       return { exists: false };
     } else if (response.status === 403) {
       const errorData = await response.json().catch(() => ({}));
-      return { exists: true, isInactive: true, error: errorData.error || 'User account is inactive' };
+      return {
+        exists: true,
+        isInactive: true,
+        user: errorData.user,
+        error: errorData.error || 'User account is inactive',
+      };
     } else {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.error || errorData.message || 'Failed to check user');

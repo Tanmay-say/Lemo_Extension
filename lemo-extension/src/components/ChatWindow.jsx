@@ -7,7 +7,7 @@ import FeedbackCard from './FeedbackCard';
 import CurrentPageIndicator from './CurrentPageIndicator';
 import { AlertCircle, WalletIcon } from 'lucide-react';
 import { ethers } from 'ethers';
-import { getConnectedWallet } from '../utils/auth.js';
+import { checkUserExists, getAuthHeader, getConnectedWallet, loginWithSIWE } from '../utils/auth.js';
 import { createSession, getCurrentSession, saveCurrentSession, getCurrentTabInfo, sendChatMessage, getSessionDetails } from '../utils/session.js';
 import { handleBuyNowClick as processFVMTransaction } from '../services/fvmService.js';
 import { submitFeedback } from '../services/fvmService.js';
@@ -39,6 +39,58 @@ const ChatWindow = () => {
   useEffect(() => {
     initializeChat();
   }, []);
+
+  const safeSendMessage = async (message, timeoutMs = 15000) => {
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Operation timed out')), timeoutMs);
+    });
+    return Promise.race([chrome.runtime.sendMessage(message), timeout]);
+  };
+
+  const ensureWalletAuthentication = async (wallet) => {
+    const existingAuth = await getAuthHeader();
+    if (existingAuth) {
+      return true;
+    }
+
+    const userStatus = await checkUserExists(wallet);
+    if (!userStatus.exists) {
+      throw new Error('Your wallet is not registered yet. Open the Wallet tab and complete registration first.');
+    }
+
+    if (userStatus.isInactive) {
+      throw new Error(userStatus.error || 'Your account is inactive.');
+    }
+
+    const signMessage = async (message) => {
+      const response = await safeSendMessage({
+        action: 'SIGN_MESSAGE',
+        account: wallet,
+        message,
+      });
+      if (response?.success && response?.signature) {
+        return response.signature;
+      }
+      throw new Error(response?.error || 'Failed to sign authentication message');
+    };
+
+    const loginResult = await loginWithSIWE(wallet, signMessage);
+    if (!loginResult.success) {
+      throw new Error(loginResult.error || 'Authentication failed');
+    }
+
+    return true;
+  };
+
+  const isAuthFailure = (message = '') => {
+    const normalized = message.toLowerCase();
+    return normalized.includes('not authenticated')
+      || normalized.includes('invalid or expired token')
+      || normalized.includes('authentication failed')
+      || normalized.includes('401')
+      || normalized.includes('403')
+      || normalized.includes('user not found');
+  };
 
   // URL change detection
   useEffect(() => {
@@ -115,6 +167,7 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
 
       // Wallet is connected - enable chat
       setWalletAddress(wallet);
+      await ensureWalletAuthentication(wallet);
       setIsAuthenticated(true);
 
       // Initialize current page info
@@ -145,9 +198,13 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
           }
         } catch (err) {
           console.error('Error loading session from backend:', err);
-          // Backend unavailable, but chat still works
-          setIsBackendAvailable(false);
-          setError('Backend unavailable. Chat will work but history won\'t be saved.');
+          if (isAuthFailure(err.message)) {
+            setIsAuthenticated(false);
+            setError(err.message);
+          } else {
+            setIsBackendAvailable(false);
+            setError('Backend unavailable. Chat will work but history won\'t be saved.');
+          }
           setMessages([{
             id: 'welcome',
             type: 'bot',
@@ -169,7 +226,8 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
     } catch (err) {
       console.error('Error initializing chat:', err);
       setIsLoadingSession(false);
-      setError('Failed to initialize chat. Please try again.');
+      setIsAuthenticated(false);
+      setError(err.message || 'Failed to initialize chat. Please try again.');
     }
   };
 
@@ -453,7 +511,13 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
             message: sessionError.message,
             stack: sessionError.stack,
           });
-          // Continue without session - backend unavailable
+          if (isAuthFailure(sessionError.message)) {
+            await ensureWalletAuthentication(walletAddress);
+            const retriedSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
+            currentSessionId = retriedSession.id || retriedSession.session_id;
+            setSessionId(currentSessionId);
+            await saveCurrentSession(currentSessionId);
+          }
         }
       }
 
@@ -498,7 +562,20 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
           setIsBackendAvailable(true);
         } catch (apiError) {
           console.error('Backend API error:', apiError);
-          throw apiError; // Let outer catch handle it
+          if (isAuthFailure(apiError.message)) {
+            await ensureWalletAuthentication(walletAddress);
+            const retriedResponse = await sendChatMessage(walletAddress, currentSessionId, inputValue);
+            const botMessage = {
+              id: `bot-${Date.now()}`,
+              type: 'bot',
+              content: retriedResponse.answer,
+              timestamp: new Date().toISOString(),
+            };
+            setMessages(prev => [...prev, botMessage]);
+            setIsBackendAvailable(true);
+          } else {
+            throw apiError;
+          }
         }
       } else {
         // No backend session - fallback message

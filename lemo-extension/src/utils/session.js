@@ -90,7 +90,7 @@ export const createSession = async (userId, currentUrl, currentDomain) => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || errorData.error || 'Failed to create session');
+      throw new Error(errorData.detail || errorData.message || errorData.error || 'Failed to create session');
     }
 
     const session = await response.json();
@@ -117,7 +117,7 @@ export const getSessionDetails = async (userId, sessionId) => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || errorData.error || 'Failed to get session details');
+      throw new Error(errorData.detail || errorData.message || errorData.error || 'Failed to get session details');
     }
 
     return await response.json();
@@ -143,7 +143,7 @@ export const sendChatMessage = async (userId, sessionId, userQuery) => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || errorData.error || 'Failed to send message');
+      throw new Error(errorData.detail || errorData.message || errorData.error || 'Failed to send message');
     }
 
     return await response.json();

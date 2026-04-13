@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Request
-from controllers.authentication import AuthenticateUser, CreateUser, RequestNonce
+from controllers.authentication import AuthenticateUser, CreateUser, GetUserStatus, RequestNonce
 
 router = APIRouter()
+
+@router.get("/user/{walletAddress}")
+async def get_user_status(req: Request):
+    """Check whether a wallet exists and is active."""
+    return await GetUserStatus(req)
 
 @router.get("/nonce/{walletAddress}")
 async def request_nonce(req: Request):

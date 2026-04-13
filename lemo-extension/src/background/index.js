@@ -105,8 +105,12 @@ async function handleWalletOperation(request, sender, sendResponse) {
       action: 'WALLET_OPERATION',
       walletAction: request.action,
       requestId: Date.now(),
-      tokenSymbol: request.tokenSymbol,  // Pass additional data
-      account: request.account            // Pass additional data
+      tokenSymbol: request.tokenSymbol,
+      account: request.account,
+      message: request.message,
+      productData: request.productData,
+      paymentMethod: request.paymentMethod,
+      walletAddress: request.walletAddress,
     });
 
     sendResponse(response);

@@ -13,6 +13,59 @@ import secrets
 from helpers.dev_store import create_or_update_user, get_user, use_dev_store
 
 
+async def GetUserStatus(req: Request):
+    """Check whether a wallet address is registered and active."""
+    try:
+        walletAddress = req.path_params.get("walletAddress")
+        if not walletAddress or not isinstance(walletAddress, str) or len(walletAddress.strip()) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "Invalid wallet address provided"}
+            )
+
+        normalizedWalletAddress = walletAddress.strip().lower()
+
+        if use_dev_store():
+            dbUser = await get_user(normalizedWalletAddress)
+        else:
+            await get_prisma()
+            dbUser = await prisma.users.find_unique(where={"wallet_address": normalizedWalletAddress})
+
+        if not dbUser:
+            return JSONResponse(
+                status_code=404,
+                content={"success": True, "exists": False, "is_active": False}
+            )
+
+        is_active = dbUser["is_active"] if isinstance(dbUser, dict) else dbUser.is_active
+        user_data = {
+            "id": dbUser["id"] if isinstance(dbUser, dict) else dbUser.id,
+            "email": dbUser["email"] if isinstance(dbUser, dict) else dbUser.email,
+            "first_name": dbUser["first_name"] if isinstance(dbUser, dict) else dbUser.first_name,
+            "last_name": dbUser["last_name"] if isinstance(dbUser, dict) else dbUser.last_name,
+            "wallet_address": dbUser["wallet_address"] if isinstance(dbUser, dict) else dbUser.wallet_address,
+            "is_active": is_active,
+        }
+
+        if not is_active:
+            return JSONResponse(
+                status_code=403,
+                content={"success": True, "exists": True, "is_active": False, "user": user_data}
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "exists": True, "is_active": True, "user": user_data}
+        )
+
+    except Exception as error:
+        print(f"[AUTH ERROR] Error checking user status: {error}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Failed to check user status"}
+        )
+
+
 async def RequestNonce(req: Request):
     """
     Generate a nonce for SIWE authentication

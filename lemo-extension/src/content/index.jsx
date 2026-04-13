@@ -201,8 +201,12 @@ async function handleWalletOperation(request, sendResponse) {
       source: 'lemo-extension',
       action: request.walletAction,
       requestId,
-      tokenSymbol: request.tokenSymbol,  // Forward additional data
-      account: request.account            // Forward additional data
+      tokenSymbol: request.tokenSymbol,
+      account: request.account,
+      message: request.message,
+      productData: request.productData,
+      paymentMethod: request.paymentMethod,
+      walletAddress: request.walletAddress,
     }, '*');
 
     // Listen for response from page context
@@ -217,9 +221,10 @@ async function handleWalletOperation(request, sendResponse) {
       window.removeEventListener('message', responseHandler);
       
       if (event.data.success) {
+        const { source, requestId: responseRequestId, ...payload } = event.data;
         sendResponse({
           success: true,
-          result: event.data.result
+          ...payload
         });
       } else {
         sendResponse({

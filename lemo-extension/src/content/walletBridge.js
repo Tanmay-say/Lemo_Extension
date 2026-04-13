@@ -232,6 +232,33 @@
           }
           break;
 
+        case 'SIGN_MESSAGE':
+          if (typeof window.ethereum === 'undefined') {
+            throw new Error('MetaMask is not installed');
+          }
+
+          try {
+            const { account, message } = event.data;
+            if (!account || !message) {
+              throw new Error('Account and message are required');
+            }
+
+            const signature = await window.ethereum.request({
+              method: 'personal_sign',
+              params: [message, account]
+            });
+
+            window.postMessage({
+              source: 'lemo-extension-response',
+              requestId,
+              success: true,
+              signature
+            }, '*');
+            return;
+          } catch (err) {
+            throw err;
+          }
+
         case 'SWITCH_TO_SEPOLIA':
           if (typeof window.ethereum === 'undefined') {
             throw new Error('MetaMask is not installed');

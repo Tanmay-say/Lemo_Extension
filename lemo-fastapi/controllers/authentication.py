@@ -6,9 +6,11 @@ from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from core.database import prisma, get_prisma
 from dependencies.auth import create_access_token, verify_siwe_signature
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import secrets
+
+from helpers.dev_store import create_or_update_user, get_user, use_dev_store
 
 
 async def RequestNonce(req: Request):
@@ -67,8 +69,6 @@ async def AuthenticateUser(req: Request):
     """
     Authenticate user with SIWE signature and return JWT token
     """
-    await get_prisma()
-    
     try:
         body = await req.json()
         walletAddress = req.path_params.get("walletAddress")
@@ -134,28 +134,31 @@ async def AuthenticateUser(req: Request):
                 }
             )
         
-        # Find user in database
-        dbUser = await prisma.users.find_unique(
-            where={"wallet_address": normalizedWalletAddress}
-        )
-        
-        if not dbUser:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "success": False,
-                    "error": "User not found. Please register first."
-                }
-            )
-        
-        if not dbUser.is_active:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False,
-                    "error": "User account is inactive"
-                }
-            )
+        if use_dev_store():
+            dbUser = await get_user(normalizedWalletAddress)
+            if not dbUser:
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "error": "User not found. Please register first."}
+                )
+            if not dbUser.get("is_active", True):
+                return JSONResponse(
+                    status_code=403,
+                    content={"success": False, "error": "User account is inactive"}
+                )
+        else:
+            await get_prisma()
+            dbUser = await prisma.users.find_unique(where={"wallet_address": normalizedWalletAddress})
+            if not dbUser:
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "error": "User not found. Please register first."}
+                )
+            if not dbUser.is_active:
+                return JSONResponse(
+                    status_code=403,
+                    content={"success": False, "error": "User account is inactive"}
+                )
         
         # Create JWT token
         access_token = create_access_token(
@@ -163,12 +166,12 @@ async def AuthenticateUser(req: Request):
         )
         
         user_data = {
-            "id": dbUser.id,
-            "email": dbUser.email,
-            "first_name": dbUser.first_name,
-            "last_name": dbUser.last_name,
-            "wallet_address": dbUser.wallet_address,
-            "is_active": dbUser.is_active,
+            "id": dbUser["id"] if isinstance(dbUser, dict) else dbUser.id,
+            "email": dbUser["email"] if isinstance(dbUser, dict) else dbUser.email,
+            "first_name": dbUser["first_name"] if isinstance(dbUser, dict) else dbUser.first_name,
+            "last_name": dbUser["last_name"] if isinstance(dbUser, dict) else dbUser.last_name,
+            "wallet_address": dbUser["wallet_address"] if isinstance(dbUser, dict) else dbUser.wallet_address,
+            "is_active": dbUser["is_active"] if isinstance(dbUser, dict) else dbUser.is_active,
         }
         
         return JSONResponse(
@@ -197,8 +200,6 @@ async def AuthenticateUser(req: Request):
 
 async def CreateUser(req: Request):
     """Create a new user account"""
-    await get_prisma()
-    
     try:
         body = await req.json()
         walletAddress = req.path_params.get("walletAddress")
@@ -246,32 +247,41 @@ async def CreateUser(req: Request):
         normalizedWalletAddress = walletAddress.strip().lower()
         normalizedEmail = email.strip()
         
-        existingUser = await prisma.users.find_first(
-            where={
-                "OR": [
-                    {"wallet_address": normalizedWalletAddress},
-                    {"email": normalizedEmail},
-                ]
-            }
-        )
-        
-        if existingUser:
-            if existingUser.wallet_address == normalizedWalletAddress:
+        if use_dev_store():
+            existingUser = await get_user(normalizedWalletAddress)
+            if existingUser:
                 return JSONResponse(
                     status_code=409,
-                    content={
-                        "success": False,
-                        "error": "User with this wallet address already exists"
-                    }
+                    content={"success": False, "error": "User with this wallet address already exists"}
                 )
-            if existingUser.email == normalizedEmail:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "success": False,
-                        "error": "User with this email already exists"
-                    }
-                )
+        else:
+            await get_prisma()
+            existingUser = await prisma.users.find_first(
+                where={
+                    "OR": [
+                        {"wallet_address": normalizedWalletAddress},
+                        {"email": normalizedEmail},
+                    ]
+                }
+            )
+
+            if existingUser:
+                if existingUser.wallet_address == normalizedWalletAddress:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "success": False,
+                            "error": "User with this wallet address already exists"
+                        }
+                    )
+                if existingUser.email == normalizedEmail:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "success": False,
+                            "error": "User with this email already exists"
+                        }
+                    )
         
         other_details_value = None
         if otherDetails:
@@ -282,26 +292,35 @@ async def CreateUser(req: Request):
             else:
                 other_details_value = json.dumps(otherDetails)
         
-        create_data = {
-            "id": normalizedWalletAddress,
-            "wallet_address": normalizedWalletAddress,
-            "email": normalizedEmail,
-            "first_name": firstName.strip(),
-            "last_name": lastName.strip(),
-            "is_active": True,
-        }
-        
-        if other_details_value is not None:
-            create_data["other_details"] = other_details_value
-        
-        newUser = await prisma.users.create(data=create_data)
+        if use_dev_store():
+            newUser = await create_or_update_user(
+                normalizedWalletAddress,
+                email=normalizedEmail,
+                first_name=firstName.strip(),
+                last_name=lastName.strip(),
+                other_details=other_details_value,
+            )
+        else:
+            create_data = {
+                "id": normalizedWalletAddress,
+                "wallet_address": normalizedWalletAddress,
+                "email": normalizedEmail,
+                "first_name": firstName.strip(),
+                "last_name": lastName.strip(),
+                "is_active": True,
+            }
+
+            if other_details_value is not None:
+                create_data["other_details"] = other_details_value
+
+            newUser = await prisma.users.create(data=create_data)
         
         user_data = {
-            "id": newUser.id,
-            "email": newUser.email,
-            "first_name": newUser.first_name,
-            "last_name": newUser.last_name,
-            "wallet_address": newUser.wallet_address,
+            "id": newUser["id"] if isinstance(newUser, dict) else newUser.id,
+            "email": newUser["email"] if isinstance(newUser, dict) else newUser.email,
+            "first_name": newUser["first_name"] if isinstance(newUser, dict) else newUser.first_name,
+            "last_name": newUser["last_name"] if isinstance(newUser, dict) else newUser.last_name,
+            "wallet_address": newUser["wallet_address"] if isinstance(newUser, dict) else newUser.wallet_address,
         }
         
         return JSONResponse(

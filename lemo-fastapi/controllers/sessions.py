@@ -2,12 +2,17 @@
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from core.database import prisma, get_prisma
+from helpers.dev_store import (
+    add_message as dev_add_message,
+    create_session as dev_create_session,
+    get_session_with_messages as dev_get_session_with_messages,
+    list_sessions as dev_list_sessions,
+    use_dev_store,
+)
 
 
 async def save_message(req: Request):
     """Save a chat message to the database"""
-    await get_prisma()
-    
     try:
         # Get userId from request state (set by middleware/dependency)
         user_id = req.state.user_id
@@ -38,32 +43,31 @@ async def save_message(req: Request):
                 content={"error": "Detected intent must be a string"}
             )
         
-        # SECURITY FIX: verify the session belongs to this user before writing
-        session = await prisma.chat_sessions.find_first(
-            where={"id": session_id, "user_id": user_id}
-        )
-        if not session:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "Session not found or unauthorized"}
+        if use_dev_store():
+            try:
+                new_message = await dev_add_message(session_id, user_id, message, message_type, detected_intent)
+            except ValueError:
+                return JSONResponse(status_code=403, content={"error": "Session not found or unauthorized"})
+        else:
+            await get_prisma()
+            session = await prisma.chat_sessions.find_first(where={"id": session_id, "user_id": user_id})
+            if not session:
+                return JSONResponse(status_code=403, content={"error": "Session not found or unauthorized"})
+            new_message = await prisma.chat_messages.create(
+                data={
+                    "session_id": session_id,
+                    "message": message,
+                    "message_type": message_type,
+                    "user_id": user_id,
+                    "detected_intent": detected_intent
+                }
             )
-        
-        # Create message
-        new_message = await prisma.chat_messages.create(
-            data={
-                "session_id": session_id,
-                "message": message,
-                "message_type": message_type,
-                "user_id": user_id,
-                "detected_intent": detected_intent
-            }
-        )
         
         return JSONResponse(
             status_code=201,
             content={
                 "message": "Message saved successfully",
-                "message_id": new_message.id
+                "message_id": new_message["id"] if isinstance(new_message, dict) else new_message.id
             }
         )
         
@@ -77,8 +81,6 @@ async def save_message(req: Request):
 
 async def create_session(req: Request):
     """Create a new chat session"""
-    await get_prisma()
-    
     try:
         # Get userId from request state
         user_id = req.state.user_id
@@ -102,20 +104,23 @@ async def create_session(req: Request):
                 content={"error": "Domain is too long. Maximum length is 255 characters"}
             )
         
-        # Create session
-        session = await prisma.chat_sessions.create(
-            data={
-                "user_id": user_id,
-                "current_url": current_url,
-                "current_domain": current_domain
-            }
-        )
+        if use_dev_store():
+            session = await dev_create_session(user_id, current_url, current_domain)
+        else:
+            await get_prisma()
+            session = await prisma.chat_sessions.create(
+                data={
+                    "user_id": user_id,
+                    "current_url": current_url,
+                    "current_domain": current_domain
+                }
+            )
         
         return JSONResponse(
             status_code=201,
             content={
                 "message": "Session created successfully",
-                "session_id": session.id
+                "session_id": session["id"] if isinstance(session, dict) else session.id
             }
         )
         
@@ -128,8 +133,6 @@ async def create_session(req: Request):
 
 async def get_session(req: Request):
     """Get a session with its messages"""
-    await get_prisma()
-    
     try:
         user_id = req.state.user_id
         
@@ -152,26 +155,40 @@ async def get_session(req: Request):
         elif current_url:
             where_clause["current_url"] = current_url
         
-        session = await prisma.chat_sessions.find_first(
-            where=where_clause,
-            include={
-                "users": False,
-                "chat_messages": {
-                    "include": {
-                        "users": False,
-                    },
-                    "order_by": {
-                        "created_at": "asc"
+        if use_dev_store():
+            if session_id:
+                session = await dev_get_session_with_messages(session_id, user_id)
+            else:
+                session = None
+                for item in await dev_list_sessions(user_id):
+                    if current_domain and item.get("current_domain") == current_domain:
+                        session = await dev_get_session_with_messages(item["id"], user_id)
+                        break
+                    if current_url and item.get("current_url") == current_url:
+                        session = await dev_get_session_with_messages(item["id"], user_id)
+                        break
+        else:
+            await get_prisma()
+            session = await prisma.chat_sessions.find_first(
+                where=where_clause,
+                include={
+                    "users": False,
+                    "chat_messages": {
+                        "include": {
+                            "users": False,
+                        },
+                        "order_by": {
+                            "created_at": "asc"
+                        }
                     }
                 }
-            }
-        )
+            )
         
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         
         # Return dict directly - FastAPI handles datetime serialization
-        return {"session": session.model_dump(mode='json')}
+        return {"session": session if isinstance(session, dict) else session.model_dump(mode='json')}
         
     except HTTPException:
         raise
@@ -182,16 +199,12 @@ async def get_session(req: Request):
 
 async def get_all_sessions(req: Request):
     """Get all sessions for a user"""
-    await get_prisma()
-    
     try:
         user_id = req.state.user_id
-        
-        sessions = await prisma.chat_sessions.find_many(
-            where={"user_id": user_id}
-        )
-        
-        # Return dict directly
+        if use_dev_store():
+            return {"sessions": await dev_list_sessions(user_id)}
+        await get_prisma()
+        sessions = await prisma.chat_sessions.find_many(where={"user_id": user_id})
         return {"sessions": [session.model_dump(mode='json') for session in sessions]}
         
     except Exception as error:

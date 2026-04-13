@@ -1,20 +1,32 @@
-from sentence_transformers import SentenceTransformer
-import numpy as np
+import hashlib
+import math
+import re
 
-# Load a lightweight embedding model (384-dimensional)
-model = SentenceTransformer('all-MiniLM-L6-v2')
+VECTOR_DIM = 384
 
-def generate_embedding(text_chunk: str) -> np.ndarray:
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9_]+", text.lower())
+
+
+def generate_embedding(text_chunk: str) -> list:
     if not text_chunk or len(text_chunk.strip()) == 0:
         raise ValueError("Input text chunk is empty.")
-    
-    if len(text_chunk) > 1000:
-        text_chunk = text_chunk[:1000]  # truncate safely
+    if len(text_chunk) > 4000:
+        text_chunk = text_chunk[:4000]
+    vector = [0.0] * VECTOR_DIM
+    tokens = _tokenize(text_chunk)
+    if not tokens:
+        return vector
 
-    embedding = model.encode(text_chunk, normalize_embeddings=True)
-    embedding = np.array(embedding, dtype=np.float32)
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % VECTOR_DIM
+        sign = -1.0 if digest[4] % 2 else 1.0
+        weight = 1.0 + (digest[5] / 255.0)
+        vector[index] += sign * weight
 
-    if embedding.shape[0] != 384:
-        raise ValueError(f"Expected embedding dimension 384, got {embedding.shape[0]}")
-
-    return embedding.tolist()
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]

@@ -1,415 +1,196 @@
-import React, { useState, useEffect } from 'react';
-import { Wallet, CheckCircle, XCircle, AlertCircle, RefreshCw, ExternalLink, Copy, ChevronDown, User } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle,
+  ChevronDown,
+  Copy,
+  ExternalLink,
+  RefreshCw,
+  User,
+  Wallet,
+  XCircle,
+} from 'lucide-react';
+
 import RegistrationModal from './RegistrationModal';
-import { checkUserExists, registerUser, loginWithSIWE } from '../utils/auth.js';
+import {
+  checkUserExists,
+  clearConnectedWallet,
+  getConnectedWallet,
+  registerUser,
+  loginWithSIWE,
+} from '../utils/auth.js';
+
+const NETWORKS = [
+  { id: 'sepolia', name: 'Sepolia', tokens: ['ETH', 'USDC', 'PYUSD'] },
+  { id: 'filecoin-calibration', name: 'Filecoin Calibration', tokens: ['FIL', 'TFIL'] },
+];
+
+const NETWORK_LABELS = {
+  sepolia: 'Sepolia',
+  'filecoin-calibration': 'Filecoin Calibration',
+};
 
 const WalletConnect = () => {
-  // Ultimate safety wrapper to prevent any crashes
-  try {
   const [account, setAccount] = useState(null);
   const [network, setNetwork] = useState(null);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isLoadingBalances, setIsLoadingBalances] = useState(false);
-  const [error, setError] = useState(null);
-  const [balances, setBalances] = useState(null);
   const [selectedNetwork, setSelectedNetwork] = useState('sepolia');
-  const [showNetworkDropdown, setShowNetworkDropdown] = useState(false);
   const [selectedToken, setSelectedToken] = useState('ETH');
+  const [showNetworkDropdown, setShowNetworkDropdown] = useState(false);
   const [showTokenDropdown, setShowTokenDropdown] = useState(false);
-  const [currentBalance, setCurrentBalance] = useState(null);
-  const [isLoadingSpecificBalance, setIsLoadingSpecificBalance] = useState(false);
-  
-  // Authentication states
   const [showRegistrationModal, setShowRegistrationModal] = useState(false);
-  const [isRegistering, setIsRegistering] = useState(false);
   const [userData, setUserData] = useState(null);
+  const [balances, setBalances] = useState(null);
+  const [currentBalance, setCurrentBalance] = useState(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
   const [isCheckingUser, setIsCheckingUser] = useState(false);
-
-  const networks = [
-    { id: 'sepolia', name: 'Sepolia', tokens: ['ETH', 'USDC', 'PYUSD'] },
-    { id: 'filecoin-calibration', name: 'Filecoin Calibration', tokens: ['FIL', 'TFIL'] }
-  ];
-
-  const getAvailableTokens = () => {
-    const currentNetwork = networks.find(n => n.id === selectedNetwork);
-    return currentNetwork ? currentNetwork.tokens : [];
-  };
-
-  // Helper function to wrap async operations with timeout
-  const withTimeout = (promise, timeoutMs) => {
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Operation timed out')), timeoutMs)
-      )
-    ]);
-  };
-
-  // Helper function to safely send messages with timeout
-  const safeSendMessage = async (message, timeoutMs = 10000) => {
-    try {
-      // Check if runtime context is valid
-      if (!chrome || !chrome.runtime || !chrome.runtime.sendMessage) {
-        console.log('Runtime context is invalid, ignoring message');
-        return null;
-      }
-      
-      return await withTimeout(chrome.runtime.sendMessage(message), timeoutMs);
-    } catch (err) {
-      // Check for extension context invalidated error
-      if (err && err.message && (err.message.includes('Extension context invalidated') || err.message.includes('context invalidated'))) {
-        console.log('Extension context invalidated (ignoring):', err.message);
-        return null;
-      }
-      console.error('Message send error:', err);
-      throw new Error(`Failed to send message: ${err.message}`);
-    }
-  };
-
-  // Helper function to safely display balance
-  const displayBalance = (balance, decimals = 18) => {
-    try {
-      if (balance == null || balance === undefined || balance === '') return '0.0000';
-      const parsed = parseInt(balance, 16);
-      if (isNaN(parsed)) return '0.0000';
-      return (parsed / Math.pow(10, decimals)).toFixed(4);
-    } catch (err) {
-      console.error('Balance parsing error:', err);
-      return '0.0000';
-    }
-  };
+  const [isLoadingBalances, setIsLoadingBalances] = useState(false);
+  const [isLoadingSpecificBalance, setIsLoadingSpecificBalance] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    checkConnection();
-    loadStoredPreferences();
-    
-    // Add comprehensive error handler to prevent popup from closing
-    const handleUnhandledRejection = (event) => {
-      console.error('Unhandled promise rejection:', event.reason);
-      setError(`Error: ${event.reason?.message || 'Unknown error occurred'}`);
-      event.preventDefault(); // Prevent popup from closing
-      event.stopPropagation(); // Stop error propagation
-    };
-    
-    const handleError = (event) => {
-      console.error('Global error:', event.error);
-      setError(`Error: ${event.error?.message || 'Unknown error occurred'}`);
-      event.preventDefault(); // Prevent popup from closing
-      event.stopPropagation(); // Stop error propagation
-    };
-    
-    // Add additional error handlers for different error types
-    const handleReferenceError = (event) => {
-      console.error('Reference error:', event.error);
-      setError(`Reference Error: ${event.error?.message || 'Function not defined'}`);
-      event.preventDefault();
-      event.stopPropagation();
-    };
-    
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    window.addEventListener('error', handleError);
-    window.addEventListener('error', handleReferenceError);
-    
-    return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-      window.removeEventListener('error', handleError);
-      window.removeEventListener('error', handleReferenceError);
-    };
+    initialize();
   }, []);
 
   useEffect(() => {
     if (account) {
-      fetchBalances();
-      fetchSpecificTokenBalance();
+      void fetchBalances();
     }
-  }, [account]);
-
-  useEffect(() => {
-    if (account && network) {
-      fetchBalances();
-      fetchSpecificTokenBalance();
-    }
-  }, [selectedNetwork]);
+  }, [account, selectedNetwork]);
 
   useEffect(() => {
     if (account && selectedToken) {
-      fetchSpecificTokenBalance();
-      saveStoredPreferences();
+      void fetchSpecificTokenBalance();
     }
-  }, [selectedToken]);
+  }, [account, selectedToken, selectedNetwork]);
 
-  const loadStoredPreferences = async () => {
-    try {
-      const result = await chrome.storage.sync.get(['selectedNetwork', 'selectedToken']);
-      if (result.selectedNetwork) {
-        setSelectedNetwork(result.selectedNetwork);
+  const getAvailableTokens = () => {
+    const current = NETWORKS.find((item) => item.id === selectedNetwork);
+    return current ? current.tokens : [];
+  };
+
+  const safeSendMessage = async (message, timeoutMs = 15000) => {
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Operation timed out')), timeoutMs);
+    });
+    return Promise.race([chrome.runtime.sendMessage(message), timeout]);
+  };
+
+  const syncNetworkState = (networkName) => {
+    if (!networkName) {
+      return;
+    }
+    setNetwork(networkName);
+    if (NETWORK_LABELS[networkName]) {
+      setSelectedNetwork(networkName);
+      const firstToken = NETWORKS.find((item) => item.id === networkName)?.tokens?.[0];
+      if (firstToken) {
+        setSelectedToken(firstToken);
       }
-      if (result.selectedToken) {
-        setSelectedToken(result.selectedToken);
-      }
-    } catch (err) {
-      console.error('Error loading stored preferences:', err);
     }
   };
 
-  const saveStoredPreferences = async () => {
+  const initialize = async () => {
     try {
-      await chrome.storage.sync.set({
-        selectedNetwork: selectedNetwork,
-        selectedToken: selectedToken
-      });
+      const storedWallet = await getConnectedWallet();
+      if (storedWallet) {
+        setAccount(storedWallet);
+      }
+      await checkConnection(storedWallet);
     } catch (err) {
-      console.error('Error saving preferences:', err);
+      console.error('Wallet initialization error:', err);
+      setError(err.message || 'Failed to initialize wallet state');
     }
   };
 
-  const checkConnection = async () => {
+  const checkConnection = async (knownWallet = null) => {
     try {
-      // Check if we're in popup context (no chrome.tabs access)
-      if (typeof chrome.tabs === 'undefined') {
-        // In popup context, we need to get tab info differently
-        const response = await safeSendMessage({ action: 'CHECK_WALLET' });
-        
-        if (response && response.success && response.result && response.result.isInstalled) {
-          if (response.result.accounts && response.result.accounts.length > 0) {
-            setAccount(response.result.accounts[0]);
-            setNetwork(response.result.network.name);
-            // Sync selectedNetwork with actual network
-            if (response.result.network.name === 'sepolia') {
-              setSelectedNetwork('sepolia');
-            } else if (response.result.network.name === 'filecoin-calibration') {
-              setSelectedNetwork('filecoin-calibration');
-            }
-          }
-        }
+      const response = await safeSendMessage({ action: 'CHECK_WALLET' });
+      if (!response?.success || !response?.result?.isInstalled) {
         return;
       }
 
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab) {
-        console.log('No active tab found');
-        return;
+      const walletAddress = response.result.accounts?.[0] || knownWallet;
+      if (walletAddress) {
+        setAccount(walletAddress);
+        syncNetworkState(response.result.network?.name);
+        await checkAndAuthenticateUser(walletAddress);
       }
-      
-      const response = await safeSendMessage({ action: 'CHECK_WALLET', tabId: tab.id });
-      
-      if (response && response.success && response.result && response.result.isInstalled) {
-        if (response.result.accounts && response.result.accounts.length > 0) {
-          setAccount(response.result.accounts[0]);
-          setNetwork(response.result.network.name);
-          // Sync selectedNetwork with actual network
-          if (response.result.network.name === 'sepolia') {
-            setSelectedNetwork('sepolia');
-          } else if (response.result.network.name === 'filecoin-calibration') {
-            setSelectedNetwork('filecoin-calibration');
-          }
-        }
-        }
-      } catch (err) {
-        console.error('Error checking connection:', err);
-      // Handle extension context invalidation
-      if (err.message && err.message.includes('Extension context invalidated')) {
-        setError('Extension needs to be reloaded. Please refresh the page.');
-      }
+    } catch (err) {
+      console.error('Error checking wallet connection:', err);
     }
   };
 
   const connectWallet = async () => {
     setIsConnecting(true);
     setError(null);
-
-    // Prevent popup from closing during connection
-    const preventClose = () => {
-      window.addEventListener('beforeunload', (e) => {
-        e.preventDefault();
-        e.returnValue = '';
-      });
-    };
-    
-    const allowClose = () => {
-      window.removeEventListener('beforeunload', (e) => {
-        e.preventDefault();
-        e.returnValue = '';
-      });
-    };
-
     try {
-      preventClose();
-      
-      // Check if we're in popup context (no chrome.tabs access)
-      if (typeof chrome.tabs === 'undefined') {
-        // In popup context, send message without tabId
-        const response = await safeSendMessage({ action: 'CONNECT_WALLET' });
-        
-      if (response && response.success && response.result && response.result.accounts && response.result.accounts.length > 0) {
-        const walletAddress = response.result.accounts[0];
-        setAccount(walletAddress);
-        setNetwork(response.result.network.name);
-        
-        // Sync selectedNetwork with actual network
-        if (response.result.network.name === 'sepolia') {
-          setSelectedNetwork('sepolia');
-        } else if (response.result.network.name === 'filecoin-calibration') {
-          setSelectedNetwork('filecoin-calibration');
-        }
-        
-        // Store in chrome storage
-        chrome.storage.sync.set({ connectedWallet: walletAddress });
-        
-        // Check if user exists in backend
-        await checkAndAuthenticateUser(walletAddress);
-      } else if (response && response.error) {
-        setError(response.error);
-      } else {
-        setError('Failed to connect to wallet. Please try again.');
-      }
-      return;
+      const response = await safeSendMessage({ action: 'CONNECT_WALLET' });
+      const walletAddress = response?.result?.accounts?.[0];
+      if (!response?.success || !walletAddress) {
+        throw new Error(response?.error || 'Failed to connect wallet');
       }
 
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab) {
-        setError('No active tab found. Please open the extension on a web page.');
-      return;
-    }
-
-      const response = await safeSendMessage({ action: 'CONNECT_WALLET', tabId: tab.id });
-      
-      if (response && response.success && response.result && response.result.accounts && response.result.accounts.length > 0) {
-        const walletAddress = response.result.accounts[0];
-        setAccount(walletAddress);
-        setNetwork(response.result.network.name);
-        
-        // Sync selectedNetwork with actual network
-        if (response.result.network.name === 'sepolia') {
-          setSelectedNetwork('sepolia');
-        } else if (response.result.network.name === 'filecoin-calibration') {
-          setSelectedNetwork('filecoin-calibration');
-        }
-        
-        // Store in chrome storage
-        chrome.storage.sync.set({ connectedWallet: walletAddress });
-        
-        // Check if user exists in backend
-        await checkAndAuthenticateUser(walletAddress);
-      } else if (response && response.error) {
-        setError(response.error);
-      } else {
-        setError('Failed to connect to wallet. Please try again.');
-      }
+      setAccount(walletAddress);
+      syncNetworkState(response.result.network?.name);
+      await chrome.storage.sync.set({ connectedWallet: walletAddress });
+      await checkAndAuthenticateUser(walletAddress);
     } catch (err) {
       console.error('Wallet connection error:', err);
-      if (err.message && err.message.includes('Extension context invalidated')) {
-        setError('Extension needs to be reloaded. Please refresh the page.');
-      } else if (err.message && err.message.includes('User rejected')) {
-        setError('Connection was rejected. Please try again.');
-      } else {
-        setError(err.message || 'Failed to connect wallet. Please ensure MetaMask is installed and unlocked.');
-      }
-    } finally {
-      allowClose();
-      setIsConnecting(false);
-    }
-  };
-
-  const switchToSepolia = async () => {
-    setIsConnecting(true);
-    setError(null);
-
-    try {
-      const response = await safeSendMessage({ action: 'SWITCH_TO_SEPOLIA' });
-      
-      if (response && response.success) {
-        setNetwork('sepolia');
-        setSelectedNetwork('sepolia');
-        // Refresh balances after network switch
-        setTimeout(() => {
-          fetchBalances();
-        }, 2000);
-      } else if (response && response.error) {
-        setError(response.error);
-      }
-    } catch (err) {
-      setError(err.message || 'Failed to switch to Sepolia');
+      setError(err.message || 'Failed to connect wallet');
     } finally {
       setIsConnecting(false);
     }
   };
 
-  const switchToFilecoin = async () => {
-    setIsConnecting(true);
+  const disconnectWallet = async () => {
+    await clearConnectedWallet();
+    setAccount(null);
+    setNetwork(null);
+    setBalances(null);
+    setCurrentBalance(null);
+    setUserData(null);
     setError(null);
-
-    try {
-      const response = await safeSendMessage({ action: 'SWITCH_TO_FILECOIN' });
-      
-      if (response && response.success) {
-        setNetwork('filecoin-calibration');
-        setSelectedNetwork('filecoin-calibration');
-        // Refresh balances after network switch
-        setTimeout(() => {
-          fetchBalances();
-        }, 2000);
-      } else if (response && response.error) {
-        setError(response.error);
-      }
-    } catch (err) {
-      setError(err.message || 'Failed to switch to Filecoin Calibration');
-    } finally {
-      setIsConnecting(false);
-    }
   };
 
   const handleNetworkChange = async (networkId) => {
-    setSelectedNetwork(networkId);
     setShowNetworkDropdown(false);
-    
-    // Reset token selection to first available token for new network
-    const availableTokens = networks.find(n => n.id === networkId)?.tokens || [];
-    if (availableTokens.length > 0) {
-      setSelectedToken(availableTokens[0]);
+    setSelectedNetwork(networkId);
+    const nextToken = NETWORKS.find((item) => item.id === networkId)?.tokens?.[0];
+    if (nextToken) {
+      setSelectedToken(nextToken);
     }
-    
-    if (networkId === 'sepolia') {
-      await switchToSepolia();
-    } else if (networkId === 'filecoin-calibration') {
-      await switchToFilecoin();
-    }
-  };
 
-  const handleTokenChange = (tokenSymbol) => {
-    setSelectedToken(tokenSymbol);
-    setShowTokenDropdown(false);
-  };
-
-  const copyAddress = async () => {
+    setIsConnecting(true);
+    setError(null);
     try {
-      await navigator.clipboard.writeText(account);
-      // You could add a toast notification here
-      console.log('Address copied to clipboard');
+      const action = networkId === 'sepolia' ? 'SWITCH_TO_SEPOLIA' : 'SWITCH_TO_FILECOIN';
+      const response = await safeSendMessage({ action });
+      if (!response?.success) {
+        throw new Error(response?.error || 'Network switch failed');
+      }
+      syncNetworkState(networkId);
     } catch (err) {
-      console.error('Failed to copy address:', err);
+      console.error('Network switch error:', err);
+      setError(err.message || 'Failed to switch network');
+    } finally {
+      setIsConnecting(false);
     }
   };
 
   const fetchBalances = async () => {
-    if (!account) return;
-    
+    if (!account) {
+      return;
+    }
     setIsLoadingBalances(true);
-    setError(null);
-
     try {
-      console.log('Fetching balances for account:', account, 'network:', selectedNetwork);
       const response = await safeSendMessage({ action: 'GET_TOKEN_BALANCES' });
-      console.log('Balance response:', response);
-      
-      if (response && response.success && response.result) {
-        console.log('Setting balances:', response.result);
+      if (response?.success && response?.result) {
         setBalances(response.result);
-      } else if (response && response.error) {
-        console.error('Balance error:', response.error);
-        setError(response.error);
+        syncNetworkState(response.result.network?.name);
       } else {
-        console.log('No balance data received');
+        throw new Error(response?.error || 'Failed to load balances');
       }
     } catch (err) {
       console.error('Error fetching balances:', err);
@@ -421,36 +202,22 @@ const WalletConnect = () => {
 
   const fetchSpecificTokenBalance = async () => {
     if (!account || !selectedToken) {
-      console.warn('Missing account or selectedToken for balance fetch:', { account, selectedToken });
       return;
     }
-    
     setIsLoadingSpecificBalance(true);
-    setError(null);
-
     try {
-      console.log('Fetching specific token balance:', selectedToken, 'for account:', account);
-      const response = await safeSendMessage({ 
+      const response = await safeSendMessage({
         action: 'GET_SPECIFIC_TOKEN_BALANCE',
         tokenSymbol: selectedToken,
-        account: account
+        account,
       });
-      console.log('Specific balance response:', response);
-      
-      if (response && response.success && response.result) {
-        console.log('Setting specific balance:', response.result);
+      if (response?.success && response?.result) {
         setCurrentBalance(response.result);
-        setError(null); // Clear any previous errors
-      } else if (response && response.error) {
-        console.error('Specific balance error:', response.error);
-        setError(response.error);
-        setCurrentBalance(null);
       } else {
-        console.log('No specific balance data received');
-        setCurrentBalance(null);
+        throw new Error(response?.error || 'Failed to fetch token balance');
       }
     } catch (err) {
-      console.error('Error fetching specific balance:', err);
+      console.error('Error fetching token balance:', err);
       setError(err.message || 'Failed to fetch token balance');
       setCurrentBalance(null);
     } finally {
@@ -458,56 +225,302 @@ const WalletConnect = () => {
     }
   };
 
-  // Check if user exists in backend
   const checkAndAuthenticateUser = async (walletAddress) => {
     setIsCheckingUser(true);
     setError(null);
-    
     try {
       const result = await checkUserExists(walletAddress);
-      
       if (result.isInactive) {
-        // User exists but is inactive
-        setError(`⚠️ Account Inactive: ${result.error}. Please contact support to activate your account. Wallet features will still work.`);
         setUserData(null);
-      } else if (result.exists) {
-        // User exists and is active, perform SIWE login to get JWT
-        console.log('[AUTH] User exists, performing SIWE login...');
-        
-        // Create signing function for MetaMask
+        setError(result.error || 'User account is inactive');
+        return;
+      }
+
+      if (result.exists) {
         const signMessage = async (message) => {
           const response = await safeSendMessage({
             action: 'SIGN_MESSAGE',
-            message: message,
-            account: walletAddress
+            account: walletAddress,
+            message,
           });
-          
-          if (response && response.success && response.signature) {
+          if (response?.success && response?.signature) {
             return response.signature;
-          } else {
-            throw new Error(response?.error || 'Failed to sign message');
           }
+          throw new Error(response?.error || 'Failed to sign message');
         };
-        
-        // Perform SIWE login to obtain JWT token
+
         const loginResult = await loginWithSIWE(walletAddress, signMessage);
-        
-        if (loginResult.success) {
-          // JWT token is now stored, format user data
-          const user = loginResult.user || result.user;
-          
-          const formattedUser = {
-            id: user?.id || walletAddress,
-            email: user?.email,
-            firstName: user?.first_name || user?.firstName,
-            lastName: user?.last_name || user?.lastName,
-            walletAddress: user?.wallet_address || user?.walletAddress || walletAddress,
-            otherDetails: user?.other_details || user?.otherDetails,
-          };
-          
-          setUserData(formattedUser);
-          console.log('[AUTH] SIWE login successful, user authenticated:', formattedUser);
-        } else {
-          throw new Error(loginResult.error || 'SIWE authentication failed');
+        if (!loginResult.success) {
+          throw new Error(loginResult.error || 'Authentication failed');
         }
-      } else {
+
+        const user = loginResult.user || result.user || {};
+        setUserData({
+          id: user.id || walletAddress,
+          email: user.email || '',
+          firstName: user.first_name || user.firstName || '',
+          lastName: user.last_name || user.lastName || '',
+          walletAddress: user.wallet_address || user.walletAddress || walletAddress,
+        });
+        return;
+      }
+
+      setShowRegistrationModal(true);
+    } catch (err) {
+      console.error('Authentication flow error:', err);
+      setError(err.message || 'Authentication failed');
+    } finally {
+      setIsCheckingUser(false);
+    }
+  };
+
+  const handleRegistration = async (formData) => {
+    if (!account) {
+      return;
+    }
+    setIsRegistering(true);
+    setError(null);
+    try {
+      await registerUser(account, formData);
+      setShowRegistrationModal(false);
+      await checkAndAuthenticateUser(account);
+    } catch (err) {
+      console.error('Registration error:', err);
+      setError(err.message || 'Registration failed');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
+  const formatAddress = (value) => {
+    if (!value) {
+      return '';
+    }
+    return `${value.slice(0, 6)}...${value.slice(-4)}`;
+  };
+
+  const formatBalance = (value) => {
+    if (value == null) {
+      return '0.0000';
+    }
+    const numeric = Number(value);
+    if (Number.isNaN(numeric)) {
+      return String(value);
+    }
+    return numeric.toFixed(4);
+  };
+
+  const getDisplayedTokenBalance = () => {
+    if (isLoadingSpecificBalance) {
+      return 'Loading...';
+    }
+    if (!currentBalance) {
+      return '0.0000';
+    }
+    if (currentBalance.balance != null) {
+      return `${formatBalance(currentBalance.balance)} ${currentBalance.symbol || selectedToken}`;
+    }
+    return '0.0000';
+  };
+
+  const copyAddress = async () => {
+    if (!account) {
+      return;
+    }
+    await navigator.clipboard.writeText(account);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const renderStatus = () => {
+    if (error) {
+      return (
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      );
+    }
+
+    if (isCheckingUser) {
+      return (
+        <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+          <RefreshCw className="h-4 w-4 animate-spin" />
+          <span>Checking account status...</span>
+        </div>
+      );
+    }
+
+    if (userData) {
+      return (
+        <div className="flex items-center gap-2 rounded-xl border border-green-200 bg-green-50 p-3 text-sm text-green-700">
+          <CheckCircle className="h-4 w-4" />
+          <span>Authenticated as {userData.firstName || 'wallet user'}</span>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-orange-200 bg-gradient-to-br from-orange-50 to-white p-4 shadow-sm">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="rounded-full bg-orange-100 p-3 text-orange-600">
+            <Wallet className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Wallet</h2>
+            <p className="text-sm text-gray-500">Connect MetaMask and sync your Lemo account</p>
+          </div>
+        </div>
+
+        {!account ? (
+          <button
+            onClick={connectWallet}
+            disabled={isConnecting}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-orange-600 px-4 py-3 font-medium text-white transition hover:shadow-lg disabled:opacity-60"
+          >
+            {isConnecting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
+            <span>{isConnecting ? 'Connecting...' : 'Connect Wallet'}</span>
+          </button>
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-gray-200 bg-white p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-600">Connected Address</span>
+                <button
+                  onClick={copyAddress}
+                  className="flex items-center gap-1 text-xs text-orange-600 hover:text-orange-700"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="font-mono text-sm text-gray-900">{formatAddress(account)}</div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="relative">
+                <button
+                  onClick={() => setShowNetworkDropdown((value) => !value)}
+                  className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm"
+                >
+                  <span>{NETWORK_LABELS[selectedNetwork] || selectedNetwork}</span>
+                  <ChevronDown className="h-4 w-4 text-gray-500" />
+                </button>
+                {showNetworkDropdown && (
+                  <div className="absolute z-10 mt-2 w-full rounded-xl border border-gray-200 bg-white shadow-lg">
+                    {NETWORKS.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => void handleNetworkChange(item.id)}
+                        className="block w-full px-3 py-2 text-left text-sm hover:bg-orange-50"
+                      >
+                        {item.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="relative">
+                <button
+                  onClick={() => setShowTokenDropdown((value) => !value)}
+                  className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm"
+                >
+                  <span>{selectedToken}</span>
+                  <ChevronDown className="h-4 w-4 text-gray-500" />
+                </button>
+                {showTokenDropdown && (
+                  <div className="absolute z-10 mt-2 w-full rounded-xl border border-gray-200 bg-white shadow-lg">
+                    {getAvailableTokens().map((token) => (
+                      <button
+                        key={token}
+                        onClick={() => {
+                          setSelectedToken(token);
+                          setShowTokenDropdown(false);
+                        }}
+                        className="block w-full px-3 py-2 text-left text-sm hover:bg-orange-50"
+                      >
+                        {token}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-200 bg-white p-4">
+              <div className="mb-1 text-sm font-medium text-gray-600">Selected Token Balance</div>
+              <div className="text-lg font-semibold text-gray-900">{getDisplayedTokenBalance()}</div>
+              {balances?.network?.name && (
+                <div className="mt-1 text-xs text-gray-500">Network: {NETWORK_LABELS[balances.network.name] || balances.network.name}</div>
+              )}
+            </div>
+
+            {renderStatus()}
+
+            {userData && (
+              <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-700">
+                  <User className="h-4 w-4 text-orange-500" />
+                  Account Profile
+                </div>
+                <div className="space-y-1 text-sm text-gray-600">
+                  <div>{[userData.firstName, userData.lastName].filter(Boolean).join(' ') || 'Wallet User'}</div>
+                  {userData.email ? <div>{userData.email}</div> : null}
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => void fetchBalances()}
+                disabled={isLoadingBalances}
+                className="flex-1 rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm font-medium text-orange-700 transition hover:bg-orange-100 disabled:opacity-60"
+              >
+                {isLoadingBalances ? 'Refreshing...' : 'Refresh'}
+              </button>
+              <button
+                onClick={() => void disconnectWallet()}
+                className="flex-1 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+        <div className="mb-2 font-medium text-gray-800">Current Network</div>
+        <div className="flex items-center gap-2">
+          {network ? (
+            <>
+              <CheckCircle className="h-4 w-4 text-green-500" />
+              <span>{NETWORK_LABELS[network] || network}</span>
+            </>
+          ) : (
+            <>
+              <XCircle className="h-4 w-4 text-gray-400" />
+              <span>Not connected</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {showRegistrationModal ? (
+        <RegistrationModal
+          walletAddress={account}
+          onSubmit={handleRegistration}
+          onCancel={() => setShowRegistrationModal(false)}
+          isLoading={isRegistering}
+        />
+      ) : null}
+    </div>
+  );
+};
+
+export default WalletConnect;

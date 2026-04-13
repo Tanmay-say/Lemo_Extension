@@ -68,7 +68,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Handle wallet operations
   if (request.action === 'CHECK_WALLET' || request.action === 'CONNECT_WALLET' ||
     request.action === 'SWITCH_TO_SEPOLIA' || request.action === 'SWITCH_TO_FILECOIN' ||
-    request.action === 'GET_TOKEN_BALANCES' || request.action === 'GET_SPECIFIC_TOKEN_BALANCE') {
+    request.action === 'GET_TOKEN_BALANCES' || request.action === 'GET_SPECIFIC_TOKEN_BALANCE' ||
+    request.action === 'SIGN_MESSAGE') {
     handleWalletOperation(request, sender, sendResponse);
     return true; // Keep message channel open for async response
   }

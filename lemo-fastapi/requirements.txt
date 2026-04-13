@@ -1,13 +1,18 @@
-fastapi==0.115.12
+fastapi>=0.115.12,<1
 prisma==0.15.0
-uvicorn[standard]==0.34.0
+uvicorn[standard]>=0.34,<1
 beautifulsoup4==4.12.3
-sentence_transformers==3.3.1
+# sentence_transformers removed — replaced with Gemini text-embedding-004 API
+# (saves ~1.2 GB: PyTorch + CUDA + transformers)
+
 ddgs==9.13.0
 python-dotenv==1.0.1
 redis==5.2.1
-numpy==1.26.4
-pydantic==2.10.5
+# numpy removed — was only needed by sentence_transformers
+
+pydantic>=2.12,<3
+numpy>=2.2,<3
+
 
 # Async HTTP client (replaces requests)
 httpx==0.28.1

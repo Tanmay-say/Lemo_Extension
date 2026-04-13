@@ -1,23 +1,14 @@
 from context_retrivers.current_page_context import current_page_context
 from context_retrivers.product_recommendation import product_recommendation
-from core.config import llm_keys
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from prompts.currentpage_asking import currentpage_asking_prompt
 from prompts.product_recommendation_prompt import product_recommendation_prompt
 from prompts.chat_history_responce_prompt import chat_history_response_prompt
+from helpers.llm_config import get_llm_for_task
 
 
 def _get_asking_llm():
-    """Lazily initialise the LLM so a missing/placeholder key doesn't crash at import."""
-    return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.7,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-        api_key=llm_keys.gemini
-    )
+    return get_llm_for_task("general")
 
 
 async def current_page_asking(user_query: str, current_page_url: str):

@@ -6,22 +6,17 @@ from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
-from core.database import prisma, get_prisma
+from types import SimpleNamespace
+
+from core.database import prisma
+from core.config import jwt_secret_key
+from helpers.dev_store import get_user, use_dev_store
 from siwe import SiweMessage
-import os
 
 
-# JWT Configuration — JWT_SECRET_KEY MUST be set in .env; crash loudly if not
-_jwt_secret = os.getenv("JWT_SECRET_KEY")
-if not _jwt_secret:
-    raise RuntimeError(
-        "JWT_SECRET_KEY is not set in environment. "
-        "Set it to a long random secret in your .env file. "
-        "Do NOT use a default value in production."
-    )
-JWT_SECRET_KEY = _jwt_secret
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+JWT_SECRET_KEY = jwt_secret_key()
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
 security = HTTPBearer()
 
@@ -78,9 +73,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     Dependency to authenticate user via JWT token
     Replaces the insecure raw wallet address authentication
     """
-    if not prisma.is_connected():
-        await prisma.connect()
-    
     token = credentials.credentials
     
     try:
@@ -100,23 +92,27 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             detail="Invalid or expired token"
         )
     
-    # Find user in database
-    user = await prisma.users.find_unique(
-        where={"wallet_address": wallet_address}
-    )
-    
+    if use_dev_store():
+        user = await get_user(wallet_address)
+        if user:
+            return SimpleNamespace(**user)
+        return SimpleNamespace(
+            id=wallet_address,
+            wallet_address=wallet_address,
+            email="",
+            first_name="",
+            last_name="",
+            is_active=True,
+        )
+
+    if not prisma.is_connected():
+        await prisma.connect()
+
+    user = await prisma.users.find_unique(where={"wallet_address": wallet_address})
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive")
     return user
 
 
@@ -132,19 +128,22 @@ async def get_optional_user(request: Request):
         
         token = auth_header.replace("Bearer ", "")
         
-        if not prisma.is_connected():
-            await prisma.connect()
-        
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         wallet_address: str = payload.get("sub")
         
         if wallet_address is None:
             return None
-        
-        user = await prisma.users.find_unique(
-            where={"wallet_address": wallet_address}
-        )
-        
+
+        if use_dev_store():
+            user = await get_user(wallet_address)
+            if user:
+                return SimpleNamespace(**user)
+            return SimpleNamespace(id=wallet_address, wallet_address=wallet_address, is_active=True)
+
+        if not prisma.is_connected():
+            await prisma.connect()
+
+        user = await prisma.users.find_unique(where={"wallet_address": wallet_address})
         return user if user and user.is_active else None
     except Exception:
         return None

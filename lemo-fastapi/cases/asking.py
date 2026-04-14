@@ -4,11 +4,74 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from prompts.currentpage_asking import currentpage_asking_prompt
 from prompts.product_recommendation_prompt import product_recommendation_prompt
 from prompts.chat_history_responce_prompt import chat_history_response_prompt
-from helpers.llm_config import get_llm_for_task, normalize_llm_exception
+from helpers.llm_config import LLMConfigurationError, LLMServiceUnavailableError, get_llm_for_task, invoke_llm_with_fallback, normalize_llm_exception
+import re
 
 
 def _get_asking_llm():
     return get_llm_for_task("general")
+
+
+def _extract_field(label: str, context_text: str) -> str | None:
+    match = re.search(rf"{label}:\s*(.+?)(?:\s+\|\s+|$)", context_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    value = " ".join(match.group(1).split())
+    return value[:300] if value else None
+
+
+def _looks_like_structured_product_context(context_text: str) -> bool:
+    return any(
+        token in context_text
+        for token in ("PRODUCT TITLE:", "PRICE:", "RATING:", "REVIEWS:", "FEATURES:", "DESCRIPTION:")
+    )
+
+
+async def _get_structured_product_context(current_page_url: str, context_text: str) -> str:
+    if _looks_like_structured_product_context(context_text):
+        return context_text
+
+    try:
+        from helpers.web_scrapper import web_scrapper
+
+        direct_chunks = await web_scrapper(current_page_url, full_page=True)
+        if direct_chunks:
+            return "\n".join(direct_chunks[:3])
+    except Exception as scrape_error:
+        print(f"[ASKING] Structured fallback scrape failed: {scrape_error}")
+
+    return context_text
+
+
+def _fallback_current_page_answer(user_query: str, current_page_url: str, context_text: str) -> str:
+    title = _extract_field("PRODUCT TITLE", context_text)
+    price = _extract_field("PRICE", context_text)
+    rating = _extract_field("RATING", context_text)
+    reviews = _extract_field("REVIEWS", context_text)
+    features = _extract_field("FEATURES", context_text)
+    description = _extract_field("DESCRIPTION", context_text)
+
+    lines = ["Here is the product summary I could extract from the page:"]
+    if title:
+        lines.append(f"Product: {title}")
+    if price:
+        lines.append(f"Price: {price}")
+    if rating:
+        lines.append(f"Rating: {rating}")
+    if reviews:
+        lines.append(f"Reviews: {reviews}")
+    if features:
+        lines.append(f"Highlights: {features[:500]}")
+    elif description:
+        lines.append(f"Description: {description[:500]}")
+    elif current_page_url:
+        domain_match = re.search(r"https?://([^/]+)", current_page_url, flags=re.IGNORECASE)
+        if domain_match:
+            lines.append(f"Source: {domain_match.group(1)}")
+
+    if not any((title, price, rating, reviews, features, description)):
+        lines.append("I could not generate a conversational answer because the LLM providers are unavailable.")
+    return "\n".join(lines)
 
 
 async def current_page_asking(user_query: str, current_page_url: str):
@@ -72,8 +135,16 @@ async def current_page_asking(user_query: str, current_page_url: str):
         prompt = currentpage_asking_prompt(context_text)
         messages = [SystemMessage(content=prompt), HumanMessage(content=user_query)]
         
-        print(f"[ASKING] Sending to Gemini AI...")
-        response = await _get_asking_llm().ainvoke(messages)
+        print(f"[ASKING] Sending to LLM provider...")
+        try:
+            response = await invoke_llm_with_fallback(messages, "general")
+        except Exception as llm_error:
+            normalized = normalize_llm_exception(llm_error)
+            if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
+                print(f"[ASKING] LLM unavailable, using deterministic fallback: {normalized}")
+                structured_context = await _get_structured_product_context(current_page_url, context_text)
+                return _fallback_current_page_answer(user_query, current_page_url, structured_context)
+            raise normalized
         
         answer = response.content if response and response.content else "I couldn't generate a response. Please try again."
         print(f"[ASKING] ✓✓✓ AI Response received: {len(answer)} characters")
@@ -100,7 +171,16 @@ async def product_asking(user_query: str, domain: str):
         
         prompt = product_recommendation_prompt(user_query, recommendations)
         messages = [SystemMessage(content=prompt), HumanMessage(content=user_query)]
-        response = await _get_asking_llm().ainvoke(messages)
+        try:
+            response = await invoke_llm_with_fallback(messages, "general")
+        except Exception as llm_error:
+            normalized = normalize_llm_exception(llm_error)
+            if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
+                return (
+                    "I could not reach an LLM provider. "
+                    f"I did complete product retrieval for domain '{domain}', but I cannot generate a recommendation summary right now."
+                )
+            raise normalized
         
         answer = response.content if response and response.content else "I couldn't generate a response. Please try again."
         print(f"[LOG] Generated answer: {answer[:100]}...")
@@ -120,7 +200,15 @@ async def chat_history_asking(user_query: str, chat_history: str):
     try:
         prompt = chat_history_response_prompt(user_query, chat_history)
         messages = [SystemMessage(content=prompt), HumanMessage(content=user_query)]
-        response = await _get_asking_llm().ainvoke(messages)
+        try:
+            response = await invoke_llm_with_fallback(messages, "general")
+        except Exception as llm_error:
+            normalized = normalize_llm_exception(llm_error)
+            if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
+                return (
+                    "I could not reach an LLM provider, so I cannot summarize prior chat history right now."
+                )
+            raise normalized
         answer = response.content if response and response.content else "I couldn't generate a response. Please try again."
         print(f"[LOG] Generated answer: {answer[:100]}...")
         return answer

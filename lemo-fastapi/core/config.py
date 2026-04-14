@@ -4,7 +4,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+ENV_PATH = Path(__file__).parent.parent / ".env"
+
+
+def _reload_project_env(override: bool = False) -> None:
+    load_dotenv(dotenv_path=ENV_PATH, override=override)
+
+
+_reload_project_env()
 
 
 def _clean_env_value(name: str, default: str = "") -> str:
@@ -29,6 +36,13 @@ class LLMKeys:
 
 REDIS_URL = None if is_placeholder(_clean_env_value("REDIS_URL")) else _clean_env_value("REDIS_URL")
 llm_keys = LLMKeys()
+
+
+def get_llm_keys() -> LLMKeys:
+    # Re-read the project .env so key updates are reflected without requiring a
+    # fresh Python process.
+    _reload_project_env(override=True)
+    return LLMKeys()
 
 
 def database_configured() -> bool:
@@ -78,11 +92,13 @@ def emergent_base_url() -> str:
 
 
 def llm_provider_preference() -> str:
+    _reload_project_env(override=True)
     value = _clean_env_value("LLM_PROVIDER", "auto").lower()
     return value if value in {"auto", "gemini", "emergent"} else "auto"
 
 
 def llm_request_timeout() -> float:
+    _reload_project_env(override=True)
     value = _clean_env_value("LLM_TIMEOUT_SECONDS", "30")
     try:
         return max(5.0, float(value))
@@ -91,6 +107,7 @@ def llm_request_timeout() -> float:
 
 
 def llm_max_retries() -> int:
+    _reload_project_env(override=True)
     value = _clean_env_value("LLM_MAX_RETRIES", "2")
     try:
         return max(0, int(value))
@@ -98,9 +115,20 @@ def llm_max_retries() -> int:
         return 2
 
 
-def chat_model_name() -> str:
-    for key in ("EMERGENT_MODEL", "GEMINI_MODEL", "LLM_MODEL"):
+def chat_model_name(provider: str | None = None) -> str:
+    _reload_project_env(override=True)
+
+    keys_by_provider = {
+        "gemini": ("GEMINI_MODEL", "LLM_MODEL"),
+        "emergent": ("EMERGENT_MODEL", "LLM_MODEL"),
+    }
+    ordered_keys = keys_by_provider.get(provider or "", ("EMERGENT_MODEL", "GEMINI_MODEL", "LLM_MODEL"))
+
+    for key in ordered_keys:
         value = _clean_env_value(key)
         if value and not is_placeholder(value):
             return value
+
+    if provider == "emergent":
+        return "gpt-4.1-mini"
     return "gemini-2.5-flash"

@@ -5,7 +5,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from controllers.query_handler import query_handler
-from core.config import llm_provider_preference, llm_keys
+from core.config import get_llm_keys, llm_provider_preference
 from routes.authentication_routes import router as authentication_routes
 from routes.session_routes import router as session_routes
 import os
@@ -19,6 +19,7 @@ limiter = Limiter(key_func=get_remote_address)
 async def lifespan(app: FastAPI):
     """Lifespan context manager (replaces deprecated @app.on_event)."""
     # Startup
+    llm_keys = get_llm_keys()
     configured_providers = []
     if llm_keys.gemini:
         configured_providers.append("Gemini")

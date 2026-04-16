@@ -131,4 +131,4 @@ def chat_model_name(provider: str | None = None) -> str:
 
     if provider == "emergent":
         return "gpt-4.1-mini"
-    return "gemini-2.5-flash"
+    return "gemini-2.5-flash-lite"

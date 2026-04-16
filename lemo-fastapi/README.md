@@ -85,6 +85,7 @@ Create a `.env` file in your project root with the following required variables:
 REDIS_URL=redis://localhost:6379/0
 JWT_SECRET_KEY=your-secret-jwt-key-min-32-chars
 GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-2.5-flash-lite
 DATABASE_URL=postgresql://user:password@localhost:5432/yourdb
 LLM_PROVIDER=auto
 ```
@@ -93,6 +94,7 @@ LLM_PROVIDER=auto
 - `DATABASE_URL`: PostgreSQL connection string for the database
 - `REDIS_URL`: Redis server URL for caching and session storage
 - `GEMINI_API_KEY`: Your Gemini API key for LLM functionality
+- `GEMINI_MODEL`: Optional. Defaults to `gemini-2.5-flash-lite` for lower-cost Gemini usage.
 - `LLM_PROVIDER`: Optional. Use `gemini`, `emergent`, or `auto` (default). If your Emergent endpoint is unreachable, set `LLM_PROVIDER=gemini` and configure a valid `GEMINI_API_KEY`.
 - `JWT_SECRET_KEY`: **REQUIRED** - Secret key for JWT token generation and validation. Must be at least 32 characters. The application will crash at startup if this is missing or too short. Example: `your-very-secure-secret-key-at-least-32-characters-long`
 

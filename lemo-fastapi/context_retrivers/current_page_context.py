@@ -4,7 +4,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helpers.embedder import generate_embedding
-from helpers.redis_functions import get_relevant_content, store_page_vector
+from helpers.redis_functions import get_page_chunks, get_relevant_content, store_page_vector
 from helpers.web_scrapper import web_scrapper
 
 
@@ -16,29 +16,35 @@ async def current_page_context(url: str, query: str):
         print(f"[CONTEXT] Query: {query}")
         print(f"{'=' * 80}\n")
 
-        print("[CONTEXT] Step 1: Calling web scraper...")
-        chunks = await web_scrapper(url, full_page=True)
+        print("[CONTEXT] Step 1: Checking cached page context...")
+        chunks = await get_page_chunks(url)
 
-        if not chunks:
-            print("[CONTEXT] Step 1 FAILED: No chunks retrieved from webpage")
-            print("[CONTEXT] Returning empty [] (will trigger fallback in asking.py)")
-            return []
+        if chunks:
+            print(f"[CONTEXT] Step 1 SUCCESS: Reusing {len(chunks)} cached chunks")
+        else:
+            print("[CONTEXT] Step 1 CACHE MISS: Calling web scraper...")
+            chunks = await web_scrapper(url, full_page=True)
 
-        print(f"[CONTEXT] Step 1 SUCCESS: Retrieved {len(chunks)} chunks")
+            if not chunks:
+                print("[CONTEXT] Scraper FAILED: No chunks retrieved from webpage")
+                print("[CONTEXT] Returning empty [] (will trigger fallback in asking.py)")
+                return []
 
-        print("[CONTEXT] Step 2: Processing embeddings and storing in Redis...")
-        stored_count = 0
-        for index, chunk in enumerate(chunks, start=1):
-            try:
-                embedding = generate_embedding(chunk)
-                await store_page_vector(url, chunk, embedding)
-                stored_count += 1
-                if index % 5 == 0:
-                    print(f"[CONTEXT] Processed {index}/{len(chunks)} chunks...")
-            except Exception as exc:
-                print(f"[CONTEXT] Failed to process chunk {index}: {exc}")
+            print(f"[CONTEXT] Scraper SUCCESS: Retrieved {len(chunks)} chunks")
 
-        print(f"[CONTEXT] Step 2 SUCCESS: Stored {stored_count}/{len(chunks)} chunks in Redis")
+            print("[CONTEXT] Step 2: Processing embeddings and storing in Redis...")
+            stored_count = 0
+            for index, chunk in enumerate(chunks, start=1):
+                try:
+                    embedding = generate_embedding(chunk)
+                    await store_page_vector(url, chunk, embedding)
+                    stored_count += 1
+                    if index % 5 == 0:
+                        print(f"[CONTEXT] Processed {index}/{len(chunks)} chunks...")
+                except Exception as exc:
+                    print(f"[CONTEXT] Failed to process chunk {index}: {exc}")
+
+            print(f"[CONTEXT] Step 2 SUCCESS: Stored {stored_count}/{len(chunks)} chunks in Redis")
 
         print("[CONTEXT] Step 3: Generating query embedding...")
         query_embedding = generate_embedding(query)
@@ -49,11 +55,15 @@ async def current_page_context(url: str, query: str):
 
         # The first scraped chunk contains the scraper's structured product
         # summary. Always keep it in the returned context.
-        first_chunk = chunks[0]
+        first_chunk = next((chunk for chunk in chunks if "PRODUCT TITLE:" in chunk), chunks[0])
         content_strings = [item[0] if isinstance(item, tuple) else item for item in (content or [])]
         if first_chunk not in content_strings:
             content = [(first_chunk, 1.0)] + (content or [])
             content = content[:5]
+
+        if not content and chunks:
+            print("[CONTEXT] Step 4 FALLBACK: Using cached chunks directly because vector search returned nothing")
+            content = [(chunk, 0.0) for chunk in chunks[:5]]
 
         if content:
             print(f"[CONTEXT] Step 4 SUCCESS: Found {len(content)} relevant chunks")

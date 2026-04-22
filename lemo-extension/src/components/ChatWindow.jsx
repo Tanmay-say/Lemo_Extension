@@ -1,15 +1,15 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { AlertCircle, WalletIcon } from 'lucide-react';
+import { ethers } from 'ethers';
 import AssistantInput from './AssistantInput';
 import BuyCard from './BuyCard';
 import ReceiptCard from './ReceiptCard';
 import FeedbackCard from './FeedbackCard';
+import ComparisonTable from './ComparisonTable';
 import CurrentPageIndicator from './CurrentPageIndicator';
-import { AlertCircle, WalletIcon } from 'lucide-react';
-import { ethers } from 'ethers';
 import { checkUserExists, getAuthHeader, getConnectedWallet, loginWithSIWE } from '../utils/auth.js';
-import { createSession, getCurrentSession, saveCurrentSession, getCurrentTabInfo, sendChatMessage, getSessionDetails } from '../utils/session.js';
-import { handleBuyNowClick as processFVMTransaction } from '../services/fvmService.js';
+import { createSession, getCurrentSession, getCurrentTabInfo, getSessionDetails, saveCurrentSession, sendChatMessage } from '../utils/session.js';
 import { submitFeedback } from '../services/fvmService.js';
 
 const ChatWindow = () => {
@@ -92,67 +92,63 @@ const ChatWindow = () => {
       || normalized.includes('user not found');
   };
 
-  // URL change detection
+  const isTrackablePageUrl = (url = '') => (
+    Boolean(url)
+      && !url.startsWith('chrome://')
+      && !url.startsWith('chrome-extension://')
+      && !url.startsWith('edge://')
+      && !url.startsWith('about:')
+  );
+
   useEffect(() => {
     const checkUrlChange = async () => {
       try {
-        const currentUrl = window.location.href;
-        
+        const tabInfo = await getCurrentTabInfo();
+        const currentUrl = tabInfo.url;
+
+        if (!isTrackablePageUrl(currentUrl)) {
+          return;
+        }
+
         if (currentUrl !== previousUrlRef.current && previousUrlRef.current !== '') {
-          console.log('[CHAT] Page change detected:', {
-            from: previousUrlRef.current,
-            to: currentUrl
-          });
-          
-          // Update current page info
-          const tabInfo = await getCurrentTabInfo();
           setCurrentPageUrl(tabInfo.url);
           setCurrentPageDomain(tabInfo.domain);
-          
-          // CLEAR previous messages (keep context fresh)
+          setCurrentProductData(null);
+
           setMessages([{
             id: `page-change-${Date.now()}`,
-          type: 'bot',
-            content: `🔄 **Page Changed!**
-
-I've detected you're now on: **${tabInfo.domain}**
-
-I've cleared my previous context and I'm ready to analyze this new page. Ask me anything about this product!`,
+            type: 'bot',
+            content: `Page changed.\n\nYou are now on: ${tabInfo.domain}\n\nI cleared the previous product context and I am ready for this page.`,
             timestamp: new Date().toISOString(),
           }]);
-          
-          // Create new session for new page
-          if (walletAddress && tabInfo.url !== 'chrome://newtab') {
+
+          if (walletAddress) {
             try {
               const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-              setSessionId(newSession.id || newSession.session_id);
-              await saveCurrentSession(newSession.id || newSession.session_id);
-            } catch (error) {
-              console.error('Error creating session for new page:', error);
+              const newSessionId = newSession.id || newSession.session_id;
+              setSessionId(newSessionId);
+              await saveCurrentSession(newSessionId);
+            } catch (sessionError) {
+              console.error('Error creating session for new page:', sessionError);
             }
           }
         }
-        
+
         previousUrlRef.current = currentUrl;
-      } catch (error) {
-        console.error('Error checking URL change:', error);
+      } catch (urlError) {
+        console.error('Error checking URL change:', urlError);
       }
     };
 
-    // Check URL change every 2 seconds
     const interval = setInterval(checkUrlChange, 2000);
-    
-    // Initial check
     checkUrlChange();
-
     return () => clearInterval(interval);
   }, [walletAddress]);
 
   const initializeChat = async () => {
     try {
-      // Check if wallet is connected
       const wallet = await getConnectedWallet();
-      
+
       if (!wallet) {
         setIsAuthenticated(false);
         setIsLoadingSession(false);
@@ -165,30 +161,24 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
         return;
       }
 
-      // Wallet is connected - enable chat
       setWalletAddress(wallet);
       await ensureWalletAuthentication(wallet);
       setIsAuthenticated(true);
 
-      // Initialize current page info
       const tabInfo = await getCurrentTabInfo();
       setCurrentPageUrl(tabInfo.url);
       setCurrentPageDomain(tabInfo.domain);
       previousUrlRef.current = tabInfo.url;
 
-      // Try to load existing session (gracefully fail if backend unavailable)
       const existingSessionId = await getCurrentSession();
-      
       if (existingSessionId) {
-        // Try to load chat history from backend
         try {
           const sessionData = await getSessionDetails(wallet, existingSessionId);
           setSessionId(existingSessionId);
           setIsBackendAvailable(true);
-          
+
           if (sessionData.session && sessionData.session.chat_messages) {
-            // Convert backend messages to our format
-            const formattedMessages = sessionData.session.chat_messages.map(msg => ({
+            const formattedMessages = sessionData.session.chat_messages.map((msg) => ({
               id: msg.id,
               type: msg.message_type === 'user' ? 'user' : 'bot',
               content: msg.message,
@@ -196,138 +186,98 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
             }));
             setMessages(formattedMessages);
           }
-        } catch (err) {
-          console.error('Error loading session from backend:', err);
-          if (isAuthFailure(err.message)) {
+        } catch (sessionError) {
+          console.error('Error loading session from backend:', sessionError);
+          if (isAuthFailure(sessionError.message)) {
             setIsAuthenticated(false);
-            setError(err.message);
+            setError(sessionError.message);
           } else {
             setIsBackendAvailable(false);
-            setError('Backend unavailable. Chat will work but history won\'t be saved.');
+            setError('Backend unavailable. Chat will work but history will not be saved.');
           }
           setMessages([{
             id: 'welcome',
             type: 'bot',
-            content: 'Hello! I\'m your Lemo AI Assistant. (⚠️ Backend offline - responses may be limited)',
+            content: 'Hello! I am your Lemo AI Assistant. Backend connectivity is limited right now.',
             timestamp: new Date().toISOString(),
           }]);
         }
       } else {
-        // No existing session, show welcome message
         setMessages([{
           id: 'welcome',
           type: 'bot',
-          content: 'Hello! I\'m your Lemo AI Assistant. I can help you find products and compare prices across platforms. Try asking me about a product!',
+          content: 'Hello! I am your Lemo AI Assistant. I can help you understand products and compare prices across platforms.',
           timestamp: new Date().toISOString(),
         }]);
       }
-      
+
       setIsLoadingSession(false);
-    } catch (err) {
-      console.error('Error initializing chat:', err);
+    } catch (initError) {
+      console.error('Error initializing chat:', initError);
       setIsLoadingSession(false);
       setIsAuthenticated(false);
-      setError(err.message || 'Failed to initialize chat. Please try again.');
+      setError(initError.message || 'Failed to initialize chat. Please try again.');
     }
   };
 
-  // Detect purchase intent from user message (LESS AGGRESSIVE)
   const detectPurchaseIntent = (message) => {
-    // ONLY high intent keywords - very explicit buying signals
     const highIntentKeywords = [
       'buy', 'purchase', 'order', 'ready to buy', 'want to buy', 'i will buy',
-      'show buy card', 'buy card', 'buy now', 'add to cart', 'checkout', 'proceed to buy'
+      'show buy card', 'buy card', 'buy now', 'add to cart', 'checkout', 'proceed to buy',
     ];
-    
-    // REMOVED: mediumIntentKeywords and interestKeywords that were too aggressive
-    
+
     const lowerMessage = message.toLowerCase().trim();
-    
-    // High intent detection
-    const hasHighIntent = highIntentKeywords.some(keyword => lowerMessage.includes(keyword));
-    if (hasHighIntent) return 'high';
-    
-    // Return 'none' for everything else - be much more conservative
-    return 'none';
+    return highIntentKeywords.some((keyword) => lowerMessage.includes(keyword)) ? 'high' : 'none';
   };
 
-  // Extract product data from AI response
   const extractProductData = (response) => {
     try {
-      // Extract price (₹29,990 format)
-      const priceMatch = response.match(/₹[\d,]+/);
-      const price = priceMatch ? priceMatch[0] : '';
-      
-      // Extract USD price ($28 format)
-      const usdMatch = response.match(/\$[\d.]+/);
-      const usdPrice = usdMatch ? usdMatch[0] : '';
-      
-      // Extract rating (4.1/5 format)
-      const ratingMatch = response.match(/(\d+\.?\d*)\/5/);
-      const rating = ratingMatch ? ratingMatch[1] : '';
-      
-      // Extract review count
-      const reviewMatch = response.match(/\((\d+[\d,]*) reviews?\)/);
-      const reviewCount = reviewMatch ? reviewMatch[1] : '';
-      
-      // Extract discount
-      const discountMatch = response.match(/(\d+)% off/);
-      const discount = discountMatch ? `${discountMatch[1]}%` : '';
-      
-      // Extract title (first bold text)
+      const priceMatch = response.match(/[₹$][\d,.]+/);
       const titleMatch = response.match(/\*\*(.*?)\*\*/);
-      const title = titleMatch ? titleMatch[1] : '';
-      
-      // Extract description (first sentence after title)
+      const ratingMatch = response.match(/(\d+\.?\d*)\/5/);
+      const reviewMatch = response.match(/\((\d+[\d,]*) reviews?\)/i);
       const descMatch = response.match(/\*\*.*?\*\*\s*([^.]+)/);
-      const description = descMatch ? descMatch[1].trim() : '';
-      
+
       return {
-        title,
-        price,
-        usdPrice,
-        rating,
-        reviewCount,
-        discount,
-        description,
-        url: window.location.href
+        title: titleMatch ? titleMatch[1] : '',
+        price: priceMatch ? priceMatch[0] : '',
+        rating: ratingMatch ? ratingMatch[1] : '',
+        reviewCount: reviewMatch ? reviewMatch[1] : '',
+        description: descMatch ? descMatch[1].trim() : '',
+        url: currentPageUrl || window.location.href,
       };
-    } catch (error) {
-      console.error('Error extracting product data:', error);
+    } catch (extractError) {
+      console.error('Error extracting product data:', extractError);
       return null;
     }
   };
 
   const handleBuyNowClick = async (productData, paymentMethod) => {
     try {
-      console.log('[ChatWindow] Buy Now clicked:', { productData, paymentMethod });
-      
       if (!walletAddress) {
         throw new Error('Please connect your wallet first from the Wallet tab.');
       }
 
-      // Add loading message
       const loadingMessage = {
         id: `loading-${Date.now()}`,
         type: 'bot',
-        content: `🔄 **Processing ${paymentMethod} Payment...**\n\nPlease wait while we process your payment. This may take a few moments.`,
+        content: `Processing ${paymentMethod} payment...`,
         timestamp: new Date().toISOString(),
-        isLoading: true
+        isLoading: true,
       };
-      setMessages(prev => [...prev, loadingMessage]);
+      setMessages((prev) => [...prev, loadingMessage]);
 
-      // Check MetaMask availability via wallet bridge
       const walletCheck = await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           window.removeEventListener('message', handler);
           reject(new Error('Wallet check timeout'));
         }, 5000);
-        
+
         window.postMessage({
           source: 'lemo-extension',
-          action: 'CHECK_WALLET'
+          action: 'CHECK_WALLET',
         }, '*');
-        
+
         const handler = (event) => {
           if (event.source === window && event.data && event.data.source === 'lemo-extension-response') {
             clearTimeout(timeout);
@@ -346,22 +296,20 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
         throw new Error('No MetaMask accounts connected. Please connect your wallet.');
       }
 
-      // Process payment via wallet bridge
-      console.log('[ChatWindow] Processing payment via wallet bridge...', { productData, paymentMethod, walletAddress });
       const result = await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           window.removeEventListener('message', handler);
           reject(new Error('Payment processing timeout'));
-        }, 60000); // 60 second timeout for payment
-        
+        }, 60000);
+
         window.postMessage({
           source: 'lemo-extension',
           action: 'PROCESS_PAYMENT',
-          productData: productData,
-          paymentMethod: paymentMethod,
-          walletAddress: walletAddress
+          productData,
+          paymentMethod,
+          walletAddress,
         }, '*');
-        
+
         const handler = (event) => {
           if (event.source === window && event.data && event.data.source === 'lemo-extension-response') {
             clearTimeout(timeout);
@@ -371,58 +319,32 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
         };
         window.addEventListener('message', handler);
       });
-      
+
       if (result.success && result.result && result.result.success) {
-        // Remove loading message
-        setMessages(prev => prev.filter(msg => msg.id !== loadingMessage.id));
-        
-        // Extract payment details from the nested result
+        setMessages((prev) => prev.filter((msg) => msg.id !== loadingMessage.id));
         const paymentData = result.result;
-        console.log('[ChatWindow] Payment data received:', paymentData);
-        console.log('[ChatWindow] Individual fields:');
-        console.log('[ChatWindow] txHash:', paymentData.txHash);
-        console.log('[ChatWindow] amountPaid:', paymentData.amountPaid);
-        console.log('[ChatWindow] currency:', paymentData.currency);
-        console.log('[ChatWindow] receiptId:', paymentData.receiptId);
-        console.log('[ChatWindow] blockNumber:', paymentData.blockNumber);
-        console.log('[ChatWindow] merchantWallet:', paymentData.merchantWallet);
-        
-        // Add success message
         const receiptUrl = paymentData.receiptCid ? `https://gateway.lighthouse.storage/ipfs/${paymentData.receiptCid}` : 'N/A';
-        const content = `✅ **Payment Successful!**\n\n**Transaction Hash:** \`${paymentData.txHash || 'N/A'}\`\n**Amount Paid:** ${paymentData.amountPaid || 'N/A'} ${paymentData.currency || 'PYUSD'}\n**Receipt ID:** ${paymentData.receiptId || 'N/A'}\n**Block Number:** ${paymentData.blockNumber || 'N/A'}\n**Merchant Wallet:** \`${paymentData.merchantWallet || 'N/A'}\`\n**Receipt URL:** [View Receipt](${receiptUrl})\n\nYour PYUSD has been transferred to the merchant wallet. Thank you for your purchase!`;
-        
-        console.log('[ChatWindow] Final content string:', content);
-        
         const successMessage = {
           id: `success-${Date.now()}`,
           type: 'bot',
-          content: content,
+          content: `Payment successful.\n\nTransaction Hash: ${paymentData.txHash || 'N/A'}\nAmount Paid: ${paymentData.amountPaid || 'N/A'} ${paymentData.currency || 'PYUSD'}\nReceipt ID: ${paymentData.receiptId || 'N/A'}\nBlock Number: ${paymentData.blockNumber || 'N/A'}\nMerchant Wallet: ${paymentData.merchantWallet || 'N/A'}\nReceipt URL: ${receiptUrl}`,
           timestamp: new Date().toISOString(),
-          isSuccess: true
+          isSuccess: true,
         };
-        setMessages(prev => [...prev, successMessage]);
-        
-        console.log('[ChatWindow] ✅ Payment successful:', paymentData);
+        setMessages((prev) => [...prev, successMessage]);
       } else {
-        console.error('[ChatWindow] Payment failed:', result);
         throw new Error(result.error || result.result?.error || 'Payment processing failed');
       }
-      
-    } catch (error) {
-      console.error('[ChatWindow] Buy Now error:', error);
-      
-      // Remove loading message if it exists
-      setMessages(prev => prev.filter(msg => !msg.isLoading));
-      
-      const errorMessage = {
+    } catch (buyError) {
+      console.error('[ChatWindow] Buy Now error:', buyError);
+      setMessages((prev) => prev.filter((msg) => !msg.isLoading));
+      setMessages((prev) => [...prev, {
         id: `error-${Date.now()}`,
         type: 'bot',
-        content: `❌ **Payment Failed**\n\n${error.message}\n\nPlease ensure you are on Sepolia testnet and have sufficient balance.`,
+        content: `Payment failed\n\n${buyError.message}\n\nPlease ensure you are on Sepolia testnet and have sufficient balance.`,
         timestamp: new Date().toISOString(),
-        isError: true
-      };
-      
-      setMessages(prev => [...prev, errorMessage]);
+        isError: true,
+      }]);
     }
   };
 
@@ -432,24 +354,22 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
       const tabInfo = await getCurrentTabInfo();
       setCurrentPageUrl(tabInfo.url);
       setCurrentPageDomain(tabInfo.domain);
-      
-      // Create new session with refreshed URL
+      setCurrentProductData(null);
+
       if (walletAddress) {
         const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-        setSessionId(newSession.id || newSession.session_id);
-        await saveCurrentSession(newSession.id || newSession.session_id);
-        
-        // Add system message about page refresh
-        const refreshMessage = {
+        const newSessionId = newSession.id || newSession.session_id;
+        setSessionId(newSessionId);
+        await saveCurrentSession(newSessionId);
+        setMessages((prev) => [...prev, {
           id: `refresh-${Date.now()}`,
           type: 'bot',
-          content: '🔄 **Page context refreshed!** I\'ve updated my understanding of the current page.',
+          content: 'Page context refreshed. I updated my understanding of the current page.',
           timestamp: new Date().toISOString(),
-        };
-        setMessages(prev => [...prev, refreshMessage]);
+        }]);
       }
-    } catch (error) {
-      console.error('Error refreshing context:', error);
+    } catch (refreshError) {
+      console.error('Error refreshing context:', refreshError);
     } finally {
       setIsRefreshingContext(false);
     }
@@ -463,11 +383,7 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
       return;
     }
 
-    // Detect purchase intent
     const intent = detectPurchaseIntent(inputValue);
-    console.log('[CHAT] Purchase intent detected:', intent);
-
-    // Create user message
     const userMessage = {
       id: `user-${Date.now()}`,
       type: 'user',
@@ -475,43 +391,27 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
       timestamp: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages((prev) => [...prev, userMessage]);
     setIsTyping(true);
     setError(null);
 
     try {
-      // Try to use backend
       let currentSessionId = sessionId;
-      
+      let tabInfo = null;
+
       if (!currentSessionId) {
         try {
-          console.log('[CHAT] ============================================');
-          console.log('[CHAT] Creating new session...');
-          console.log('[CHAT] Wallet Address:', walletAddress);
-          
-          const tabInfo = await getCurrentTabInfo();
-          console.log('[CHAT] ✓ Got tab info:', tabInfo);
-          console.log('[CHAT]   - URL:', tabInfo.url);
-          console.log('[CHAT]   - Domain:', tabInfo.domain);
-          
-          console.log('[CHAT] Calling createSession API...');
+          tabInfo = await getCurrentTabInfo();
           const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-          console.log('[CHAT] ✓ Session created:', newSession);
-          
           currentSessionId = newSession.id || newSession.session_id;
-          console.log('[CHAT] ✓ Session ID:', currentSessionId);
-          
           setSessionId(currentSessionId);
           await saveCurrentSession(currentSessionId);
-          console.log('[CHAT] ✓ Session saved to storage');
-          console.log('[CHAT] ============================================');
         } catch (sessionError) {
-          console.error('[CHAT] ✗✗✗ Failed to create session:', sessionError);
-          console.error('[CHAT] Error details:', {
-            message: sessionError.message,
-            stack: sessionError.stack,
-          });
+          console.error('[CHAT] Failed to create session:', sessionError);
           if (isAuthFailure(sessionError.message)) {
+            if (!tabInfo) {
+              tabInfo = await getCurrentTabInfo();
+            }
             await ensureWalletAuthentication(walletAddress);
             const retriedSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
             currentSessionId = retriedSession.id || retriedSession.session_id;
@@ -521,108 +421,75 @@ I've cleared my previous context and I'm ready to analyze this new page. Ask me 
         }
       }
 
-      if (currentSessionId) {
-        // Try to send message to backend
-        try {
-          const response = await sendChatMessage(walletAddress, currentSessionId, inputValue);
-          
-          // Extract product data and check for buy intent
-          const productData = extractProductData(response.answer);
-          const shouldShowBuyCard = intent !== 'none' && productData && productData.title;
-          
-          console.log('[CHAT] Purchase Intent Detection:', {
-            userMessage: inputValue,
-            detectedIntent: intent,
-            extractedProductData: productData,
-            shouldShowBuyCard: shouldShowBuyCard
-          });
-          
-          if (shouldShowBuyCard) {
-            setCurrentProductData(productData);
-            console.log('[CHAT] ✓ Buy Card will be shown with:', productData);
-          } else {
-            console.log('[CHAT] ✗ Buy Card not shown. Reason:', {
-              intent: intent,
-              hasProductData: !!productData,
-              hasTitle: !!(productData && productData.title)
-            });
-          }
-
-          // Add bot response from backend
-          const botMessage = {
-            id: `bot-${Date.now()}`,
-            type: 'bot',
-            content: response.answer,
-            timestamp: new Date().toISOString(),
-            showBuyCard: shouldShowBuyCard,
-            productData: productData
-          };
-
-          setMessages(prev => [...prev, botMessage]);
-          setIsBackendAvailable(true);
-        } catch (apiError) {
-          console.error('Backend API error:', apiError);
-          if (isAuthFailure(apiError.message)) {
-            await ensureWalletAuthentication(walletAddress);
-            const retriedResponse = await sendChatMessage(walletAddress, currentSessionId, inputValue);
-            const botMessage = {
-              id: `bot-${Date.now()}`,
-              type: 'bot',
-              content: retriedResponse.answer,
-              timestamp: new Date().toISOString(),
-            };
-            setMessages(prev => [...prev, botMessage]);
-            setIsBackendAvailable(true);
-          } else {
-            throw apiError;
-          }
-        }
-      } else {
-        // No backend session - fallback message
+      if (!currentSessionId) {
         throw new Error('Backend service unavailable. Please check your settings and ensure the backend is running.');
       }
-    } catch (err) {
-      console.error('Error sending message:', err);
+
+      const sendAndRenderResponse = async () => {
+        const response = await sendChatMessage(walletAddress, currentSessionId, inputValue);
+        const productData = response.product || extractProductData(response.answer);
+        const comparisonData = response.comparison || null;
+        const shouldShowBuyCard = intent !== 'none' && productData && productData.title;
+
+        if (productData?.title) {
+          setCurrentProductData(productData);
+        }
+
+        const botMessage = {
+          id: `bot-${Date.now()}`,
+          type: 'bot',
+          content: response.answer,
+          timestamp: new Date().toISOString(),
+          showBuyCard: shouldShowBuyCard,
+          productData,
+          showComparisonTable: Boolean(comparisonData?.products?.length),
+          comparisonData,
+        };
+
+        setMessages((prev) => [...prev, botMessage]);
+        setIsBackendAvailable(true);
+      };
+
+      try {
+        await sendAndRenderResponse();
+      } catch (apiError) {
+        console.error('Backend API error:', apiError);
+        if (isAuthFailure(apiError.message)) {
+          await ensureWalletAuthentication(walletAddress);
+          await sendAndRenderResponse();
+        } else {
+          throw apiError;
+        }
+      }
+    } catch (sendError) {
+      console.error('Error sending message:', sendError);
       setIsBackendAvailable(false);
-      
-      // Show error but don't completely break
-      const errorDetails = err.message.includes('403') 
+
+      const errorDetails = sendError.message.includes('403')
         ? 'Your account may be inactive. Please contact support or check your registration status.'
-        : err.message;
-      
+        : sendError.message;
+
       setError(`Backend error: ${errorDetails}`);
-      
-      // Add error message to chat
-      const errorMessage = {
+      setMessages((prev) => [...prev, {
         id: `error-${Date.now()}`,
         type: 'bot',
-        content: `⚠️ **Backend Service Error**
-
-I couldn't process your request. ${errorDetails}
-
-**Troubleshooting:**
-- Check Settings → Backend Configuration
-- Ensure backend server is running
-- Verify your account is active`,
+        content: `Backend service error\n\nI couldn't process your request. ${errorDetails}\n\nTroubleshooting:\n- Check Settings -> Backend Configuration\n- Ensure backend server is running\n- Verify your account is active`,
         timestamp: new Date().toISOString(),
         isError: true,
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      }]);
     } finally {
       setIsTyping(false);
     }
   };
 
   const clearChat = async () => {
-    // Clear session
     setSessionId(null);
+    setCurrentProductData(null);
     await saveCurrentSession(null);
-    
-    // Reset messages
     setMessages([{
       id: 'welcome',
       type: 'bot',
-      content: 'Hello! I\'m your Lemo AI Assistant. I can help you find products and compare prices across platforms. Try asking me about a product!',
+      content: 'Hello! I am your Lemo AI Assistant. I can help you find products and compare prices across platforms. Try asking me about a product.',
       timestamp: new Date().toISOString(),
     }]);
   };
@@ -630,16 +497,13 @@ I couldn't process your request. ${errorDetails}
   const formatTime = (timestamp) => {
     try {
       const date = new Date(timestamp);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     } catch (err) {
       return '';
     }
   };
 
-  // Check if content is markdown
-  const isMarkdown = (content) => {
-    return /[#*_`\[\]]/g.test(content) || content.includes('\n\n');
-  };
+  const isMarkdown = (content) => /[#*_`\[\]]/g.test(content) || content.includes('\n\n');
 
   if (isLoadingSession) {
     return (
@@ -652,7 +516,6 @@ I couldn't process your request. ${errorDetails}
 
   return (
     <div className="flex flex-col h-full bg-white">
-      {/* Error Banner */}
       {error && (
         <div className="bg-red-50 border-b border-red-200 p-3 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
@@ -660,7 +523,6 @@ I couldn't process your request. ${errorDetails}
         </div>
       )}
 
-      {/* Backend Status Warning */}
       {!isBackendAvailable && (
         <div className="bg-yellow-50 border-b border-yellow-200 p-3 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-yellow-600 flex-shrink-0" />
@@ -670,7 +532,6 @@ I couldn't process your request. ${errorDetails}
         </div>
       )}
 
-      {/* Not Authenticated Warning */}
       {!isAuthenticated && (
         <div className="bg-orange-50 border-b border-orange-200 p-4 flex items-center justify-center gap-3">
           <WalletIcon className="w-5 h-5 text-orange-600" />
@@ -680,20 +541,16 @@ I couldn't process your request. ${errorDetails}
         </div>
       )}
 
-      {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gradient-to-b from-gray-50 to-white">
         {messages.map((message) => (
           <div
             key={message.id}
-            className={`flex gap-3 animate-slide-in-up ${
-              message.type === 'user' ? 'flex-row-reverse' : 'flex-row'
-            }`}
+            className={`flex gap-3 animate-slide-in-up ${message.type === 'user' ? 'flex-row-reverse' : 'flex-row'}`}
           >
-            {/* Avatar */}
             <div
               className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden ${
                 message.type === 'bot'
-                  ? message.isError 
+                  ? message.isError
                     ? 'bg-gradient-to-br from-red-500 to-red-600'
                     : 'bg-gradient-to-br from-orange-500 to-orange-600'
                   : 'bg-gradient-to-br from-blue-400 to-cyan-400'
@@ -702,11 +559,10 @@ I couldn't process your request. ${errorDetails}
               {message.type === 'bot' ? (
                 <img src={chrome.runtime.getURL('logo.png')} alt="Lemo" className="w-6 h-6 rounded-full object-cover" />
               ) : (
-                '👤'
+                'U'
               )}
             </div>
 
-            {/* Message Content */}
             <div className={`flex-1 max-w-[75%] ${message.type === 'user' ? 'items-end' : 'items-start'}`}>
               <div
                 className={`rounded-2xl px-4 py-3 shadow-sm ${
@@ -728,58 +584,58 @@ I couldn't process your request. ${errorDetails}
               <span className="text-xs text-gray-400 mt-1 block px-2">
                 {formatTime(message.timestamp)}
               </span>
-              
-              {/* Show Buy Card if message has buy intent */}
+
               {message.showBuyCard && message.productData && (
                 <div className="mt-3">
-                  <BuyCard 
+                  <BuyCard
                     productData={message.productData}
                     onBuyClick={handleBuyNowClick}
                     walletAddress={walletAddress}
                   />
                 </div>
               )}
-              
-              {/* Show Receipt Card if purchase successful */}
+
+              {message.showComparisonTable && message.comparisonData && (
+                <div className="mt-3">
+                  <ComparisonTable comparisonData={message.comparisonData} />
+                </div>
+              )}
+
               {message.showReceiptCard && message.receiptData && (
-                  <div className="mt-3">
+                <div className="mt-3">
                   <ReceiptCard
                     receiptData={message.receiptData}
                     onFeedbackClick={(receiptId) => {
-                      // Add feedback card to messages
                       const feedbackMessage = {
                         id: `feedback-${Date.now()}`,
                         type: 'bot',
-                        content: 'We\'d love to hear your feedback! Please rate your experience.',
+                        content: "We'd love to hear your feedback! Please rate your experience.",
                         timestamp: new Date().toISOString(),
                         showFeedbackCard: true,
-                        receiptId: receiptId
+                        receiptId,
                       };
-                      setMessages(prev => [...prev, feedbackMessage]);
+                      setMessages((prev) => [...prev, feedbackMessage]);
                     }}
-                    />
-                  </div>
-                )}
+                  />
+                </div>
+              )}
 
-              {/* Show Feedback Card */}
               {message.showFeedbackCard && message.receiptId && (
-                  <div className="mt-3">
+                <div className="mt-3">
                   <FeedbackCard
                     receiptId={message.receiptId}
                     onSubmit={async (receiptId, feedbackData) => {
-                      // Submit feedback through FVM service
                       if (!window.ethereum || !walletAddress) return;
-                      
+
                       const provider = new ethers.BrowserProvider(window.ethereum);
                       const result = await submitFeedback(receiptId, feedbackData, walletAddress, provider);
-                      
+
                       if (result.success) {
-                        // Update message with submission status and reward
-                        setMessages(prev => prev.map(msg => 
-                          msg.id === message.id 
+                        setMessages((prev) => prev.map((msg) => (
+                          msg.id === message.id
                             ? { ...msg, isFeedbackSubmitted: true, feedbackReward: result.reward }
                             : msg
-                        ));
+                        )));
                       } else {
                         throw new Error(result.error);
                       }
@@ -787,13 +643,12 @@ I couldn't process your request. ${errorDetails}
                     isSubmitted={message.isFeedbackSubmitted}
                     reward={message.feedbackReward}
                   />
-                  </div>
-                )}
+                </div>
+              )}
             </div>
           </div>
         ))}
 
-        {/* Typing Indicator */}
         {isTyping && (
           <div className="flex gap-3">
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-orange-500 to-orange-600 flex items-center justify-center overflow-hidden">
@@ -811,15 +666,14 @@ I couldn't process your request. ${errorDetails}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
       <div className="p-3 bg-white border-t border-gray-200">
-        <CurrentPageIndicator 
+        <CurrentPageIndicator
           url={currentPageUrl}
           domain={currentPageDomain}
           onRefresh={handleRefreshContext}
           isRefreshing={isRefreshingContext}
         />
-        <AssistantInput 
+        <AssistantInput
           onSendMessage={handleSendMessage}
           disabled={!isAuthenticated || isTyping}
         />

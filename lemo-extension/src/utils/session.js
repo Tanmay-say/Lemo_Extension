@@ -17,6 +17,13 @@ export const extractDomain = (url) => {
   }
 };
 
+const isTrackablePageUrl = (url = '') =>
+  Boolean(url) &&
+  !url.startsWith('chrome-extension://') &&
+  !url.startsWith('chrome://') &&
+  !url.startsWith('edge://') &&
+  !url.startsWith('about:');
+
 /**
  * Get current tab URL and domain
  * @returns {Promise<{url: string, domain: string}>}
@@ -25,31 +32,26 @@ export const getCurrentTabInfo = async () => {
   try {
     console.log('[SESSION] === Getting current tab info ===');
 
-    if (typeof window !== 'undefined' && window.location && window.location.href) {
-      const currentUrl = window.location.href;
-      if (!currentUrl.startsWith('chrome-extension://') &&
-        !currentUrl.startsWith('chrome://') &&
-        !currentUrl.startsWith('edge://') &&
-        !currentUrl.startsWith('about:')) {
-        console.log('[SESSION] ✓✓✓ Method 1 SUCCESS (window.location):', currentUrl);
-        return { url: currentUrl, domain: extractDomain(currentUrl) };
-      }
-    }
-
     try {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (tab && tab.url && !tab.url.startsWith('chrome-extension://') && !tab.url.startsWith('chrome://')) {
-        console.log('[SESSION] ✓ Method 2 SUCCESS (chrome.tabs):', tab.url);
+      if (tab && isTrackablePageUrl(tab.url)) {
+        console.log('[SESSION] Active tab URL:', tab.url);
         return { url: tab.url, domain: extractDomain(tab.url) };
       }
-    } catch (e) {
-      console.log('[SESSION] ✗ Method 2 ERROR:', e.message);
+    } catch (error) {
+      console.log('[SESSION] chrome.tabs lookup failed:', error.message);
     }
 
-    console.warn('[SESSION] ✗✗✗ FAILED: Could not find any valid page URL');
+    if (typeof window !== 'undefined' && window.location && isTrackablePageUrl(window.location.href)) {
+      const currentUrl = window.location.href;
+      console.log('[SESSION] Using window.location fallback:', currentUrl);
+      return { url: currentUrl, domain: extractDomain(currentUrl) };
+    }
+
+    console.warn('[SESSION] No trackable product page detected');
     return { url: 'chrome://newtab', domain: 'chrome' };
   } catch (error) {
-    console.error('[SESSION] ✗✗✗ CRITICAL ERROR getting tab info:', error);
+    console.error('[SESSION] Critical error getting tab info:', error);
     return { url: 'chrome://newtab', domain: 'chrome' };
   }
 };
@@ -64,7 +66,7 @@ const getAuthHeaders = async (extra = {}) => {
     throw new Error('Not authenticated. Please connect your wallet and log in first.');
   }
   return {
-    'Authorization': authHeader,
+    Authorization: authHeader,
     'Content-Type': 'application/json',
     ...extra,
   };
@@ -86,18 +88,14 @@ export const createSession = async (userId, currentUrl, currentDomain) => {
       body: JSON.stringify({ current_url: currentUrl, current_domain: currentDomain }),
     });
 
-    console.log('[SESSION API] ✓ Response received:', response.status, response.statusText);
-
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || errorData.message || errorData.error || 'Failed to create session');
     }
 
-    const session = await response.json();
-    console.log('[SESSION API] ✓✓✓ Session created:', session);
-    return session;
+    return await response.json();
   } catch (error) {
-    console.error('[SESSION API] ✗✗✗ Error creating session:', error);
+    console.error('[SESSION API] Error creating session:', error);
     throw error;
   }
 };

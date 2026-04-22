@@ -91,6 +91,9 @@ async def intent_detection(user_query: str) -> IntentOutput:
 
     try:
         response = await structured_llm.ainvoke(messages)
+        if response is None:
+            logger.warning("Intent detection returned no structured result, using heuristic fallback")
+            return fallback_intent_detection(user_query)
         return response
     except Exception as exc:
         normalized = normalize_llm_exception(exc)

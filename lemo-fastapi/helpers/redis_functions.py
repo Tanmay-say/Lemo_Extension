@@ -323,6 +323,38 @@ async def get_relevant_content(url: str, query_embedding: List[float], top_k: in
         return []
 
 
+async def get_page_chunks(url: str) -> List[str]:
+    """Return all cached content chunks for a URL."""
+    try:
+        r = await get_redis_connection()
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        chunk_keys = await r.smembers(f"url_chunks:{url_hash}")
+
+        if not chunk_keys:
+            await r.close()
+            return []
+
+        contents: List[str] = []
+        for key in chunk_keys:
+            try:
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8")
+                chunk_data = await r.hgetall(key)
+                if not chunk_data or b"content" not in chunk_data:
+                    continue
+                content = chunk_data[b"content"].decode("utf-8") if isinstance(chunk_data[b"content"], bytes) else chunk_data[b"content"]
+                if content:
+                    contents.append(content)
+            except Exception as exc:
+                print(f"[WARNING] Failed to load cached chunk {key}: {exc}")
+
+        await r.close()
+        return contents
+    except Exception as exc:
+        print(f"[WARNING] Failed to read cached page chunks for {url}: {exc}")
+        return []
+
+
 # Get chat history based on session_id
 async def get_chat_history(session_id: str) -> List[Dict[str, Any]]:
     """

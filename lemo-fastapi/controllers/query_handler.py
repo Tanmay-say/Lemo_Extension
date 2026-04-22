@@ -1,6 +1,6 @@
 from fastapi import Request, Depends
 from fastapi.responses import JSONResponse
-from helpers.intent_detection import intent_detection
+from helpers.intent_detection import fallback_intent_detection, intent_detection
 from cases.asking import asking, current_page_asking
 from helpers.get_session_details import get_session_details
 from helpers.add_chats import add_chats
@@ -27,7 +27,7 @@ async def query_handler(request: Request):
         
         # Get user from JWT token (optional - works for both authenticated and anonymous)
         user = await get_optional_user(request)
-        user_id = user.wallet_address if user else request.headers.get("Authorization")
+        user_id = user.id if user else request.headers.get("Authorization")
         
         if not session_id:
             return JSONResponse(
@@ -61,14 +61,18 @@ async def query_handler(request: Request):
 
         # Detect intent (now properly awaited — was blocking the event loop)
         intent = await intent_detection(user_query)
+        if intent is None or not getattr(intent, "intent", None) or not getattr(intent, "scope", None):
+            logger.warning("Intent detection returned an invalid result, using heuristic fallback")
+            intent = fallback_intent_detection(user_query)
         logger.info(f"Detected intent: {intent.intent}, scope: {intent.scope}")
         
         # Process based on intent
         answer = None
+        result_payload = None
         
         if intent.scope == "current_page":
             logger.info("Processing current_page intent")
-            answer = await current_page_asking(user_query, current_page_url)
+            result_payload = await current_page_asking(user_query, current_page_url)
         else:
             logger.info(f"Processing {intent.scope} intent")
             # Build formatted chat history text for chat_history scope
@@ -77,7 +81,12 @@ async def query_handler(request: Request):
                 for msg in session_details.get("chat_messages", [])
             ])
             # BUG FIX: pass chat_history (formatted text), not session_id
-            answer = await asking(user_query, domain, current_page_url, intent.scope, session_id, chat_history)
+            result_payload = await asking(user_query, domain, current_page_url, intent.scope, session_id, chat_history)
+
+        if isinstance(result_payload, dict):
+            answer = result_payload.get("answer")
+        else:
+            answer = result_payload
         
         logger.info(f"Generated answer: {answer[:100] if answer else 'None'}...")
         
@@ -86,10 +95,13 @@ async def query_handler(request: Request):
         if answer:
             await add_chats(session_id, answer, "assistant", intent.intent, user_id)
         
-        return JSONResponse(
-            content={"success": True, "answer": answer}, 
-            status_code=200
-        )
+        response_body = {"success": True, "answer": answer}
+        if isinstance(result_payload, dict):
+            for key in ("product", "comparison", "ui"):
+                if result_payload.get(key) is not None:
+                    response_body[key] = result_payload[key]
+
+        return JSONResponse(content=response_body, status_code=200)
     
     except ValueError as e:
         logger.error(f"ValueError in query_handler: {e}")

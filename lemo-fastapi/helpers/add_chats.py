@@ -1,6 +1,7 @@
 from helpers.redis_functions import add_message_to_chat
 from core.database import prisma, get_prisma
 from helpers.dev_store import add_message as dev_add_message, use_dev_store
+from helpers.get_session_details import invalidate_session_details_cache
 
 async def add_chats(session_id: str, message: str, message_type: str, detected_intent: str, user_id: str):
     try:
@@ -49,6 +50,7 @@ async def add_chats(session_id: str, message: str, message_type: str, detected_i
             print(f"[WARNING] Redis store skipped: {redis_err}")
         
         print(f"[LOG] Message successfully added for session {session_id}")
+        await invalidate_session_details_cache(session_id, user_id)
         return {"status": "success", "message": "Message added", "message_id": new_message["id"] if isinstance(new_message, dict) else new_message.id}
     
     except Exception as e:

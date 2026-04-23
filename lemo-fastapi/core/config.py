@@ -30,8 +30,12 @@ def is_placeholder(value: str) -> bool:
 class LLMKeys:
     groq: str = field(default_factory=lambda: _clean_env_value("GROQ_API_KEY"))
     openai: str = field(default_factory=lambda: _clean_env_value("OPENAI_API_KEY"))
-    gemini: str = field(default_factory=lambda: "" if is_placeholder(_clean_env_value("GEMINI_API_KEY")) else _clean_env_value("GEMINI_API_KEY"))
-    emergent: str = field(default_factory=lambda: "" if is_placeholder(_clean_env_value("EMERGENT_LLM_KEY")) else _clean_env_value("EMERGENT_LLM_KEY"))
+    gemini: str = field(
+        default_factory=lambda: "" if is_placeholder(_clean_env_value("GEMINI_API_KEY")) else _clean_env_value("GEMINI_API_KEY")
+    )
+    emergent: str = field(
+        default_factory=lambda: "" if is_placeholder(_clean_env_value("EMERGENT_LLM_KEY")) else _clean_env_value("EMERGENT_LLM_KEY")
+    )
 
 
 REDIS_URL = None if is_placeholder(_clean_env_value("REDIS_URL")) else _clean_env_value("REDIS_URL")
@@ -46,38 +50,17 @@ def get_llm_keys() -> LLMKeys:
 
 
 def database_configured() -> bool:
-    """Return True only if DATABASE_URL is set AND the Prisma engine is available.
-
-    Set USE_DEV_STORE=true in .env to force the JSON file fallback regardless.
-    """
-    # Explicit override: respect USE_DEV_STORE env var
+    """Return True when database usage is explicitly configured."""
     if _clean_env_value("USE_DEV_STORE", "").lower() in ("1", "true", "yes"):
         return False
     if is_placeholder(_clean_env_value("DATABASE_URL")):
         return False
-    # Guard: check that the Prisma query engine exists in any of the known cache patterns
     try:
-        import glob
-        cache_patterns = [
-            # binary engine (openssl 1.x / 3.0.x)
-            str(Path.home() / ".cache" / "prisma-python" / "binaries" / "*" / "*" / "prisma-query-engine-*"),
-            str(Path(__file__).parent.parent / "prisma-query-engine-*"),
-            # library engine (.so.node) — fetched on openssl 3.x systems
-            str(Path.home() / ".cache" / "prisma-python" / "binaries" / "*" / "*" / "node_modules" / "@prisma" / "engines" / "libquery_engine-*.so.node"),
-        ]
-        if not any(glob.glob(p) for p in cache_patterns):
-            print(
-                "[CONFIG] Prisma engine not found in cache. "
-                "Run `prisma py fetch` then restart. Falling back to dev-store."
-            )
-            return False
-    except Exception as _err:
-        print(f"[CONFIG] Could not check Prisma engine: {_err}. Falling back to dev-store.")
+        from prisma import Prisma  # noqa: F401
+    except Exception as err:
+        print(f"[CONFIG] Prisma client import failed: {err}. Falling back to dev-store.")
         return False
     return True
-
-
-
 
 
 def jwt_secret_key() -> str:
@@ -106,6 +89,16 @@ def llm_request_timeout() -> float:
         return 30.0
 
 
+def llm_stream_timeout() -> float:
+    """Timeout budget for streaming Gemini calls (Lemo agent)."""
+    _reload_project_env(override=True)
+    value = _clean_env_value("LLM_STREAM_TIMEOUT_SECONDS", "120")
+    try:
+        return max(10.0, float(value))
+    except ValueError:
+        return 120.0
+
+
 def llm_max_retries() -> int:
     _reload_project_env(override=True)
     value = _clean_env_value("LLM_MAX_RETRIES", "2")
@@ -131,4 +124,22 @@ def chat_model_name(provider: str | None = None) -> str:
 
     if provider == "emergent":
         return "gpt-4.1-mini"
-    return "gemini-2.5-flash-lite"
+    return "gemini-3.1-pro-preview"
+
+
+def gemini_fast_model() -> str:
+    """Cheap/fast Gemini model used by IntentTracker and analysis tasks."""
+    _reload_project_env(override=True)
+    value = _clean_env_value("GEMINI_FAST_MODEL")
+    if value and not is_placeholder(value):
+        return value
+    return "gemini-flash-lite-latest"
+
+
+def gemini_embed_model() -> str:
+    """Embedding model used for current-page vector retrieval."""
+    _reload_project_env(override=True)
+    value = _clean_env_value("GEMINI_EMBED_MODEL")
+    if value and not is_placeholder(value):
+        return value
+    return "gemini-embedding-001"

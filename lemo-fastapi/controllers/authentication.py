@@ -113,12 +113,20 @@ async def RequestNonce(req: Request):
                 }
             )
         
-        # Generate a cryptographically secure random nonce (alphanumeric, min 8 chars per EIP-4361)
-        nonce = secrets.token_hex(16)  # 32 hex chars, fully alphanumeric
-        
-        # SiweMessage requires EIP-55 checksum address (mixed-case), not lowercase
         from web3 import Web3
-        normalizedAddress = Web3.to_checksum_address(walletAddress.strip())
+        try:
+            normalizedAddress = Web3.to_checksum_address(walletAddress.strip())
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid wallet address provided"
+                }
+            )
+
+        # Generate a cryptographically secure random nonce (alphanumeric, min 8 chars per EIP-4361)
+        nonce = secrets.token_hex(16)
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(minutes=5)
 
@@ -193,7 +201,16 @@ async def AuthenticateUser(req: Request):
         
         normalizedWalletAddress = walletAddress.strip().lower()
         normalizedMessage = message.strip()
-        parsed_message = SiweMessage.from_message(message=normalizedMessage)
+        try:
+            parsed_message = SiweMessage.from_message(message=normalizedMessage)
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "error": "Invalid SIWE message"
+                }
+            )
         
         # Verify stored nonce (replay attack prevention)
         try:

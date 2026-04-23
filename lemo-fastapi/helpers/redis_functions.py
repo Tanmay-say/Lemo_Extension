@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 import asyncio
 
-VECTOR_DIM = 384  # embedding dimension
+VECTOR_DIM = 768  # embedding dimension (Gemini text-embedding-004)
 
 # Guard pool creation — app must not crash at import if REDIS_URL is missing
 if REDIS_URL:
@@ -154,7 +154,12 @@ async def search_similar(query_embedding: List[float], top_k: int = 5) -> List[T
                 # Extract embedding
                 emb_bytes = doc_data[b'embedding']
                 doc_vector = np.frombuffer(emb_bytes, dtype=np.float32)
-                
+
+                # Skip legacy vectors that were stored with a different dimension.
+                # They'll be overwritten on the next scrape for the same URL.
+                if doc_vector.shape[0] != VECTOR_DIM:
+                    continue
+
                 # Extract URL
                 url = doc_data[b'url'].decode('utf-8') if isinstance(doc_data[b'url'], bytes) else doc_data[b'url']
                 
@@ -287,7 +292,11 @@ async def get_relevant_content(url: str, query_embedding: List[float], top_k: in
                 # Extract embedding
                 emb_bytes = chunk_data[b'embedding']
                 chunk_vector = np.frombuffer(emb_bytes, dtype=np.float32)
-                
+
+                # Skip legacy chunks with a different embedding dimension.
+                if chunk_vector.shape[0] != VECTOR_DIM:
+                    continue
+
                 # Extract content
                 content = chunk_data[b'content'].decode('utf-8') if isinstance(chunk_data[b'content'], bytes) else chunk_data[b'content']
                 

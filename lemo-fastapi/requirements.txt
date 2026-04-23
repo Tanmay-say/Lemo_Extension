@@ -2,13 +2,11 @@ fastapi>=0.115.12,<1
 prisma==0.15.0
 uvicorn[standard]>=0.34,<1
 beautifulsoup4==4.12.3
-# sentence_transformers removed — replaced with Gemini text-embedding-004 API
-# (saves ~1.2 GB: PyTorch + CUDA + transformers)
 
+# Search fallback (DuckDuckGo) — primary SERP now goes through ScrapingBee Google
 ddgs==9.13.0
 python-dotenv==1.0.1
 redis==5.2.1
-# numpy removed — was only needed by sentence_transformers
 
 pydantic>=2.12,<3
 numpy>=2.2,<3
@@ -17,7 +15,7 @@ numpy>=2.2,<3
 # Async HTTP client (replaces requests)
 httpx==0.28.1
 
-# ScrapingBee client
+# ScrapingBee client — used for product-page scraping and Google SERP discovery
 scrapingbee==2.0.1
 
 # JWT Authentication & SIWE
@@ -29,7 +27,18 @@ eth-account==0.13.7
 # Rate limiting
 slowapi==0.1.9
 
-# LLM integrations (versions auto-resolve compatible langchain-core)
-langchain-google-genai==2.0.5
+# ===== LLM + Agent stack =====
+# Official Google GenAI SDK (Gemini 3.1 Pro / Flash, text-embedding-004).
+# Replaces the deprecated langchain-google-genai + google-generativeai path.
+google-genai>=1.0.0
+
+# Multi-agent orchestration (IntentTracker -> Scraper -> Lemo).
+langgraph>=0.2,<1
+
+# Rule-based product matching (rapidfuzz) — replaces embedding similarity for product search.
+rapidfuzz>=3.9,<4
+
+# Emergent / OpenAI-compatible fallback provider only.
+langchain-core>=0.3,<1
 langchain-openai==0.3.13
 langchain-anthropic==0.3.2

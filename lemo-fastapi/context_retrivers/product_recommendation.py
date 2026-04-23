@@ -1,80 +1,99 @@
-import sys
+"""Legacy product_recommendation retained for backward compatibility.
+
+The new multi-agent pipeline handles product discovery inside
+`agents/scraper_agent.py`, which uses the ScrapingBee Google SERP + rapidfuzz
+title matching. Embeddings are no longer used for product matching (they are
+unreliable for this task, as documented in the debug guide).
+
+This module is kept so `cases/asking.py` — the legacy fallback — keeps
+working for direct callers. It now returns a ranked list of scraped product
+dicts ordered by fuzzy title match.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
 import os
+import re
+import sys
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from helpers.get_product_urls import google_serp_search  # noqa: E402
+from helpers.web_scrapper import web_scrapper  # noqa: E402
 
-from helpers.get_product_urls import browser
-from helpers.web_scrapper import web_scrapper
-from helpers.embedder import generate_embedding
-from helpers.redis_functions import store_vector, search_similar, create_redis_index
+logger = logging.getLogger(__name__)
+
+try:
+    from rapidfuzz import fuzz  # type: ignore
+except ImportError:  # pragma: no cover
+    fuzz = None  # type: ignore
+
+
+MATCH_THRESHOLD = 60  # a bit looser than the scraper agent since there's no reference title
+
+
+def _title_from_chunks(chunks) -> str:
+    if not chunks:
+        return ""
+    text = chunks[0] if isinstance(chunks, list) else str(chunks)
+    match = re.search(r"PRODUCT TITLE:\s*(.+?)(?:\s+\|\s+|$)", text, flags=re.IGNORECASE)
+    if match:
+        return " ".join(match.group(1).split())[:200]
+    return ""
 
 
 async def product_recommendation(domain: str, user_query: str):
-    print(f"[LOG] Starting product recommendation for query: '{user_query}' on domain: '{domain}'")
-    
-    # Ensure Redis index exists before storing/searching
+    """Return a list of candidate product URLs ranked by fuzzy title match.
+
+    Returns a list[str] of URLs (ordered, best first) to stay compatible with
+    the legacy `product_recommendation_prompt` which iterates URL strings.
+    """
+    logger.info(
+        "[product_recommendation] domain=%s query=%r (rule-based, no embeddings)",
+        domain,
+        user_query[:80],
+    )
+
     try:
-        await create_redis_index()
-    except Exception as e:
-        print(f"[ERROR] Failed to create/verify Redis index: {e}")
-        return set()
-    
-    # Fetch product URLs
-    try:
-        browser_result = browser(user_query, domain, 10)
-        if not browser_result.get("success") or not browser_result.get("urls"):
-            print(f"[WARNING] No products found from browser")
-            list_of_products = []
-        else:
-            list_of_products = browser_result["urls"]
-        print(f"[LOG] Found {len(list_of_products)} products from browser")
-    except Exception as e:
-        print(f"[ERROR] Browser search failed: {e}")
-        return set()
-    
-    # Process and store products
-    for idx, product_url in enumerate(list_of_products, 1):
-        print(f"[LOG] Processing product {idx}/{len(list_of_products)}: {product_url}")
+        serp = await google_serp_search(user_query, site=domain or None, limit=10)
+    except Exception as exc:
+        logger.warning("[product_recommendation] SERP failed: %s", exc)
+        return []
+
+    urls = serp.get("urls") or []
+    if not urls:
+        logger.warning("[product_recommendation] No product URLs returned")
+        return []
+
+    async def _scrape_one(url: str) -> dict | None:
         try:
-            chunk = await web_scrapper(product_url)
-            print(f"[LOG] Extracted chunk from {product_url}")
-            
-            if not chunk or (isinstance(chunk, str) and len(chunk.strip()) == 0):
-                print(f"[WARNING] Empty chunk extracted from {product_url}, skipping")
-                continue
-            
-            print(f"[LOG] Generating embedding for chunk")
-            embedding = generate_embedding(product_url + " " + chunk)
-            print(f"[LOG] Storing vector for {product_url}")
-            result = await store_vector(product_url, embedding)
-            if result.get("status") != "success":
-                print(f"[WARNING] Failed to store vector: {result.get('message')}")
-        except Exception as e:
-            print(f"[ERROR] Failed to process {product_url}: {e}")
+            chunks = await web_scrapper(url)
+        except Exception as exc:
+            logger.debug("[product_recommendation] scrape failed for %s: %s", url, exc)
+            return None
+        if not chunks:
+            return None
+        title = _title_from_chunks(chunks if isinstance(chunks, list) else [chunks])
+        return {"url": url, "title": title, "chunk": chunks}
+
+    scraped = await asyncio.gather(*[_scrape_one(u) for u in urls], return_exceptions=False)
+
+    ranked: list[dict] = []
+    for entry in scraped:
+        if not entry:
             continue
-    
-    # Search for similar products
-    try:
-        print(f"[LOG] Generating embedding for user query: '{user_query}'")
-        query_embedding = generate_embedding(user_query)
-        
-        # Note: Requesting top 10 but only stored 4 new products
-        # This may return old/unrelated products from Redis if they exist
-        print(f"[LOG] Searching for similar products (top 10)")
-        similar_products = await search_similar(query_embedding, 10)
-        print(f"[LOG] Found {len(similar_products)} similar products")
-        
-        # Use generator expression instead of list comprehension in set()
-        similar_products_urls = {product[0] for product in similar_products}
-        print(f"[LOG] Unique product URLs: {len(similar_products_urls)}")
-        print(f"[LOG] Recommendation complete. Returning {len(similar_products_urls)} unique products")
-        
-        return similar_products_urls
-    except Exception as e:
-        print(f"[ERROR] Failed to search for similar products: {e}")
-        return set()
+        title = entry.get("title") or ""
+        # Use fuzzy match vs the user's query as a weak relevance signal.
+        if fuzz is not None:
+            score = float(fuzz.token_set_ratio(user_query, title)) if title else 0.0
+        else:
+            score = 100.0 if user_query.lower() in (title or "").lower() else 40.0
+        if score < MATCH_THRESHOLD and title:
+            continue
+        ranked.append({"url": entry["url"], "title": title, "score": round(score, 2)})
 
-
-# if __name__ == "__main__":
-#     result = product_recommendation("allensolly.abfrl.in", "Blue Jeans for men")
-#     print(result)
+    ranked.sort(key=lambda r: r["score"], reverse=True)
+    logger.info("[product_recommendation] returning %d ranked candidates", len(ranked))
+    return [r["url"] for r in ranked[:10]]

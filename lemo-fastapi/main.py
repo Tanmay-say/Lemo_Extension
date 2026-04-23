@@ -1,14 +1,29 @@
+import logging
+import os
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
 from controllers.query_handler import query_handler
-from core.config import get_llm_keys, llm_provider_preference
+from agents.graph import pipeline_backend_name
+from core.config import (
+    chat_model_name,
+    gemini_embed_model,
+    gemini_fast_model,
+    get_llm_keys,
+    llm_provider_preference,
+)
+from core.logging_config import request_id_middleware, setup_logging
 from routes.authentication_routes import router as authentication_routes
 from routes.session_routes import router as session_routes
-import os
+
+setup_logging()
+logger = logging.getLogger("lemo.main")
 
 
 # Initialize rate limiter
@@ -27,25 +42,33 @@ async def lifespan(app: FastAPI):
         configured_providers.append("Emergent")
     provider_summary = ", ".join(configured_providers) if configured_providers else "none"
 
-    print("="*80)
-    print("🚀 Starting Lemo FastAPI Server")
-    print("="*80)
-    print("✓ Rate limiting enabled")
-    print("✓ SIWE authentication configured")
-    print("✓ ScrapingBee scraper ready")
-    print(f"✓ LLM providers configured: {provider_summary}")
-    print(f"✓ LLM provider preference: {llm_provider_preference()}")
+    logger.info("=" * 80)
+    logger.info("[LEMO] Starting Lemo FastAPI Server")
+    logger.info("=" * 80)
+    logger.info("[OK] Rate limiting enabled")
+    logger.info("[OK] SIWE authentication configured")
+    logger.info("[OK] ScrapingBee scraper ready")
+    logger.info("[OK] LLM providers configured: %s", provider_summary)
+    logger.info("[OK] LLM provider preference: %s", llm_provider_preference())
+    logger.info("[OK] Python executable: %s", sys.executable)
+    logger.info("[OK] Pipeline backend: %s", pipeline_backend_name())
+    logger.info(
+        "[OK] Models -> pro=%s fast=%s embed=%s",
+        chat_model_name("gemini"),
+        gemini_fast_model(),
+        gemini_embed_model(),
+    )
     if os.getenv("UVICORN_RELOAD") == "true":
-        print("ℹ Development reload is enabled; startup logs can appear more than once")
-    print("="*80)
+        logger.info("[INFO] Development reload is enabled; startup logs can appear more than once")
+    logger.info("=" * 80)
     yield
-    # Shutdown
-    print("Shutting down Lemo FastAPI Server...")
+    logger.info("Shutting down Lemo FastAPI Server...")
 
 
 app = FastAPI(lifespan=lifespan)
 
-# Add rate limiter to app
+app.middleware("http")(request_id_middleware)
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -72,7 +95,11 @@ async def root():
             "scraping": "ScrapingBee + httpx async",
             "llm": "Gemini + Emergent LLM Key support",
             "rate_limiting": "Enabled"
-        }
+        },
+        "runtime": {
+            "python": sys.executable,
+            "pipeline_backend": pipeline_backend_name(),
+        },
     }
 
 

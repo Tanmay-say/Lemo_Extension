@@ -1,133 +1,204 @@
-from fastapi import Request, Depends
+"""Entry point for POST /query."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from urllib.parse import urlparse
+
+from fastapi import Request
 from fastapi.responses import JSONResponse
-from helpers.intent_detection import fallback_intent_detection, intent_detection
-from cases.asking import asking, current_page_asking
-from helpers.get_session_details import get_session_details
+
+from agents.graph import run_lemo_pipeline
+from agents.state import LemoState
+from dependencies.auth import get_optional_user
 from helpers.add_chats import add_chats
+from helpers.get_session_details import get_session_details
 from helpers.llm_config import (
     LLMConfigurationError,
     LLMServiceUnavailableError,
     normalize_llm_exception,
     user_facing_llm_message,
 )
-from dependencies.auth import get_optional_user
-import logging
+from helpers.runtime_cache import get_json, set_json
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+ANSWER_CACHE_TTL_SECONDS = 10 * 60
+
+
+def _derive_domain(url: str) -> str:
+    try:
+        netloc = urlparse(url).netloc.lower()
+        return netloc.removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _history_fingerprint(chat_history: list[dict]) -> str:
+    if not chat_history:
+        return "empty"
+    last = chat_history[-1]
+    parts = [
+        str(len(chat_history)),
+        str(last.get("message_type") or ""),
+        str(last.get("message") or "")[:200],
+        str(last.get("created_at") or ""),
+    ]
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _answer_cache_key(
+    *,
+    session_id: str,
+    user_id: str,
+    current_page_url: str,
+    user_query: str,
+    chat_history: list[dict],
+) -> str:
+    raw = "|".join(
+        [
+            session_id,
+            user_id,
+            current_page_url.strip().lower(),
+            user_query.strip().lower(),
+            _history_fingerprint(chat_history),
+        ]
+    )
+    return f"answer:cache:{hashlib.md5(raw.encode('utf-8')).hexdigest()}"
+
+
+async def _resolve_user_id(request: Request) -> str | None:
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if not auth_header:
+        return None
+    if not auth_header.startswith("Bearer "):
+        return None
+    user = await get_optional_user(request)
+    return user.id if user else None
+
+
 async def query_handler(request: Request):
-    """
-    Handle user queries with proper error handling and rate limiting
-    """
+    """Handle user queries through the LEMO pipeline."""
     try:
         session_id = request.query_params.get("session_id")
         body = await request.json()
-        
-        # Get user from JWT token (optional - works for both authenticated and anonymous)
-        user = await get_optional_user(request)
-        user_id = user.id if user else request.headers.get("Authorization")
-        
+
         if not session_id:
             return JSONResponse(
-                content={"success": False, "message": "Session ID is required"}, 
-                status_code=400
+                content={"success": False, "message": "Session ID is required"},
+                status_code=400,
             )
-        
+
+        user_id = await _resolve_user_id(request)
         if not user_id:
             return JSONResponse(
-                content={"success": False, "message": "User authentication required"}, 
-                status_code=401
+                content={"success": False, "message": "User authentication required"},
+                status_code=401,
             )
-        
-        session_details = await get_session_details(session_id, user_id)
-        user_query = body.get("user_query")
-        
+
+        user_query = (body.get("user_query") or "").strip()
         if not user_query:
             return JSONResponse(
-                content={"success": False, "message": "User query is required"}, 
-                status_code=400
+                content={"success": False, "message": "User query is required"},
+                status_code=400,
             )
-        
-        domain = session_details.get("current_domain")
+
+        session_details = await get_session_details(session_id, user_id)
         current_page_url = session_details.get("current_url")
-        
+        domain = session_details.get("current_domain") or _derive_domain(current_page_url or "")
+        chat_history = session_details.get("chat_messages") or []
+
         if not current_page_url:
             return JSONResponse(
-                content={"success": False, "message": "Current page URL not found in session"}, 
-                status_code=400
+                content={"success": False, "message": "Current page URL not found in session"},
+                status_code=400,
             )
 
-        # Detect intent (now properly awaited — was blocking the event loop)
-        intent = await intent_detection(user_query)
-        if intent is None or not getattr(intent, "intent", None) or not getattr(intent, "scope", None):
-            logger.warning("Intent detection returned an invalid result, using heuristic fallback")
-            intent = fallback_intent_detection(user_query)
-        logger.info(f"Detected intent: {intent.intent}, scope: {intent.scope}")
-        
-        # Process based on intent
-        answer = None
-        result_payload = None
-        
-        if intent.scope == "current_page":
-            logger.info("Processing current_page intent")
-            result_payload = await current_page_asking(user_query, current_page_url)
-        else:
-            logger.info(f"Processing {intent.scope} intent")
-            # Build formatted chat history text for chat_history scope
-            chat_history = "\n".join([
-                f"{msg.get('message_type')}: {msg.get('message')}" 
-                for msg in session_details.get("chat_messages", [])
-            ])
-            # BUG FIX: pass chat_history (formatted text), not session_id
-            result_payload = await asking(user_query, domain, current_page_url, intent.scope, session_id, chat_history)
+        answer_cache_key = _answer_cache_key(
+            session_id=session_id,
+            user_id=user_id,
+            current_page_url=current_page_url,
+            user_query=user_query,
+            chat_history=chat_history,
+        )
+        cached_response = await get_json(answer_cache_key)
+        if isinstance(cached_response, dict) and cached_response.get("success") is True:
+            logger.info("[query] answer cache hit for session=%s", session_id)
+            return JSONResponse(content=cached_response, status_code=200)
 
-        if isinstance(result_payload, dict):
-            answer = result_payload.get("answer")
-        else:
-            answer = result_payload
-        
-        logger.info(f"Generated answer: {answer[:100] if answer else 'None'}...")
-        
-        # Add messages to both DB and Redis
-        await add_chats(session_id, user_query, "user", intent.intent, user_id)
+        initial_state: LemoState = {
+            "user_query": user_query,
+            "session_id": session_id,
+            "user_id": user_id,
+            "domain": domain,
+            "current_page_url": current_page_url,
+            "chat_history": chat_history,
+        }
+
+        logger.info("QUERY session=%s user=%s domain=%s history=%d", session_id, user_id, domain, len(chat_history))
+
+        t0 = time.perf_counter()
+        result = await run_lemo_pipeline(initial_state)
+        pipeline_ms = (time.perf_counter() - t0) * 1000
+
+        answer = (result.get("final_answer") or "").strip() or "I couldn't generate a response. Please try again."
+        intent_label = result.get("intent") or "ask"
+        scraped_count = len(result.get("scraped_data") or [])
+        errors = result.get("errors") or []
+
+        logger.info(
+            "PIPELINE RESULT %.0fms intent=%s scope=%s next_action=%s scraped=%d errors=%s",
+            pipeline_ms,
+            result.get("intent"),
+            result.get("scope"),
+            result.get("next_action"),
+            scraped_count,
+            errors if errors else "(none)",
+        )
+
+        await add_chats(session_id, user_query, "user", intent_label, user_id)
         if answer:
-            await add_chats(session_id, answer, "assistant", intent.intent, user_id)
-        
-        response_body = {"success": True, "answer": answer}
-        if isinstance(result_payload, dict):
-            for key in ("product", "comparison", "ui"):
-                if result_payload.get(key) is not None:
-                    response_body[key] = result_payload[key]
+            await add_chats(session_id, answer, "assistant", intent_label, user_id)
 
+        response_body: dict = {"success": True, "answer": answer}
+        for key in ("product", "comparison", "ui"):
+            value = result.get(key)
+            if value is not None:
+                response_body[key] = value
+        if result.get("scope"):
+            response_body["scope"] = result["scope"]
+        if result.get("next_action"):
+            response_body["next_action"] = result["next_action"]
+
+        await set_json(answer_cache_key, response_body, ANSWER_CACHE_TTL_SECONDS)
         return JSONResponse(content=response_body, status_code=200)
-    
+
     except ValueError as e:
-        logger.error(f"ValueError in query_handler: {e}")
+        logger.error("ValueError in query_handler: %s", e)
         return JSONResponse(
-            content={"success": False, "message": "Invalid request data"}, 
-            status_code=400
+            content={"success": False, "message": "Invalid request data"},
+            status_code=400,
         )
     except (LLMConfigurationError, LLMServiceUnavailableError) as e:
-        logger.error(f"LLM error in query_handler: {e}")
+        logger.error("LLM error in query_handler: %s", e)
         status_code = 503 if isinstance(e, LLMServiceUnavailableError) else 500
         return JSONResponse(
             content={"success": False, "message": user_facing_llm_message(e)},
-            status_code=status_code
+            status_code=status_code,
         )
     except Exception as e:
         normalized = normalize_llm_exception(e)
         if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
-            logger.error(f"Normalized LLM error in query_handler: {normalized}")
+            logger.error("Normalized LLM error in query_handler: %s", normalized)
             status_code = 503 if isinstance(normalized, LLMServiceUnavailableError) else 500
             return JSONResponse(
                 content={"success": False, "message": user_facing_llm_message(normalized)},
-                status_code=status_code
+                status_code=status_code,
             )
-        logger.error(f"Unexpected error in query_handler: {e}", exc_info=True)
-        # Never expose internal error details to users
+        logger.error("Unexpected error in query_handler: %s", e, exc_info=True)
         return JSONResponse(
-            content={"success": False, "message": "An error occurred processing your request"}, 
-            status_code=500
+            content={"success": False, "message": "An error occurred processing your request"},
+            status_code=500,
         )

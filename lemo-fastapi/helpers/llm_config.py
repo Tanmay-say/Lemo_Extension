@@ -1,23 +1,41 @@
+"""LLM provider configuration.
+
+Gemini is now served by `helpers.gemini_client` (official `google-genai` SDK).
+LangChain is kept only for the Emergent / OpenAI-compatible fallback provider,
+so legacy code paths in `cases/asking.py` continue to work.
+
+Public API preserved so that `controllers.query_handler` and the legacy asking
+flow keep their error-handling contracts:
+    - LLMConfigurationError / LLMServiceUnavailableError
+    - normalize_llm_exception / user_facing_llm_message
+    - get_llm_for_task / invoke_llm_with_fallback
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
-from typing import Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
 import httpx
 
-from core.config import chat_model_name, emergent_base_url, get_llm_keys, llm_max_retries, llm_provider_preference, llm_request_timeout
+from core.config import (
+    chat_model_name,
+    emergent_base_url,
+    get_llm_keys,
+    llm_max_retries,
+    llm_provider_preference,
+    llm_request_timeout,
+)
 
 try:
     from openai import APIConnectionError as OpenAIAPIConnectionError
-except Exception:  # pragma: no cover - keeps imports resilient during partial installs
+except Exception:  # pragma: no cover
     OpenAIAPIConnectionError = tuple()  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
-
-try:
-    from google.api_core.exceptions import PermissionDenied as GooglePermissionDenied
-except Exception:  # pragma: no cover - keeps imports resilient during partial installs
-    GooglePermissionDenied = tuple()  # type: ignore[assignment]
 
 
 class LLMConfigurationError(ValueError):
@@ -86,18 +104,95 @@ def _validate_base_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
-def _build_gemini_client(model: str, temperature: float):
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    llm_keys = get_llm_keys()
+# ---------------------------------------------------------------------------
+# Gemini adapter — presents a LangChain-ish interface over gemini_client.
+# ---------------------------------------------------------------------------
 
-    print(f"[LLM] Using Google Gemini model '{model}'")
-    return ChatGoogleGenerativeAI(
-        model=model,
-        google_api_key=llm_keys.gemini,
-        temperature=temperature,
-        max_output_tokens=2048,
-        timeout=llm_request_timeout(),
-    )
+
+class _GeminiResponse:
+    """Minimal ducktype for LangChain `AIMessage`. Only `.content` is read."""
+
+    __slots__ = ("content",)
+
+    def __init__(self, content: str):
+        self.content = content
+
+
+def _split_langchain_messages(messages: Iterable[Any]) -> tuple[str, str]:
+    """Flatten LangChain message list into (system, user) strings.
+
+    System messages are concatenated with newlines; human messages likewise.
+    Other message types are appended to the user string with a role prefix.
+    """
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+
+    for msg in messages:
+        msg_type = getattr(msg, "type", None)
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            msg_type = msg.get("type") or msg.get("role")
+            content = msg.get("content")
+        if not content:
+            continue
+
+        text = content if isinstance(content, str) else str(content)
+        if msg_type in ("system", "developer"):
+            system_parts.append(text)
+        elif msg_type in ("human", "user"):
+            user_parts.append(text)
+        elif msg_type in ("ai", "assistant"):
+            user_parts.append(f"[assistant previously said] {text}")
+        else:
+            user_parts.append(text)
+
+    return "\n\n".join(system_parts), "\n\n".join(user_parts) or ""
+
+
+class _GeminiChatAdapter:
+    """Lightweight LangChain-compatible wrapper around `gemini_client`.
+
+    Supports:
+        * `await adapter.ainvoke(messages)` → `_GeminiResponse`
+        * `adapter.with_structured_output(Schema)` → adapter with schema bound
+    """
+
+    def __init__(self, model: str, temperature: float, schema: type | None = None):
+        self._model = model
+        self._temperature = temperature
+        self._schema = schema
+
+    def with_structured_output(self, schema: type) -> "_GeminiChatAdapter":
+        return _GeminiChatAdapter(self._model, self._temperature, schema=schema)
+
+    async def ainvoke(self, messages: Iterable[Any]) -> Any:
+        from helpers import gemini_client
+
+        system, user = _split_langchain_messages(messages)
+        if not user.strip():
+            user = "(no user content)"
+
+        if self._schema is not None:
+            return await gemini_client.generate(
+                user=user,
+                model=self._model,
+                system=system or None,
+                temperature=self._temperature,
+                schema=self._schema,
+            )
+
+        text = await gemini_client.generate(
+            user=user,
+            model=self._model,
+            system=system or None,
+            temperature=self._temperature,
+        )
+        return _GeminiResponse(text if isinstance(text, str) else str(text))
+
+
+def _build_gemini_client(model: str, temperature: float) -> _GeminiChatAdapter:
+    logger.info("[LLM] Using Google Gemini model '%s' via google-genai SDK", model)
+    return _GeminiChatAdapter(model=model, temperature=temperature)
 
 
 def _build_emergent_client(model: str, temperature: float):
@@ -105,7 +200,7 @@ def _build_emergent_client(model: str, temperature: float):
     llm_keys = get_llm_keys()
 
     base_url = _validate_base_url(emergent_base_url())
-    print(f"[LLM] Using Emergent proxy at '{base_url}' with model '{model}'")
+    logger.info("[LLM] Using Emergent proxy at '%s' with model '%s'", base_url, model)
     return ChatOpenAI(
         model=model,
         api_key=llm_keys.emergent,
@@ -118,6 +213,10 @@ def _build_emergent_client(model: str, temperature: float):
 
 
 def get_llm_for_task(task_type: str = "general", provider: str | None = None):
+    """Return a ducktype LangChain chat client for legacy callers.
+
+    New code should prefer `helpers.gemini_client` directly.
+    """
     temperature = _temperatures().get(task_type, 0.7)
     last_error: Exception | None = None
 
@@ -134,7 +233,7 @@ def get_llm_for_task(task_type: str = "general", provider: str | None = None):
             raise
         except Exception as exc:
             last_error = exc
-            print(f"[LLM] Failed to initialize provider '{selected_provider}': {exc}")
+            logger.warning("[LLM] Failed to initialize provider '%s': %s", selected_provider, exc)
 
     if last_error is not None:
         raise LLMServiceUnavailableError("Unable to initialize any configured LLM provider.") from last_error
@@ -149,10 +248,13 @@ def is_llm_connection_error(exc: Exception) -> bool:
 
 
 def is_llm_auth_error(exc: Exception) -> bool:
-    if GooglePermissionDenied and isinstance(exc, GooglePermissionDenied):
-        return True
     message = str(exc).lower()
-    return "permission denied" in message or "consumer_suspended" in message or "api key" in message
+    return (
+        "permission denied" in message
+        or "consumer_suspended" in message
+        or "api key" in message
+        or "unauthenticated" in message
+    )
 
 
 def normalize_llm_exception(exc: Exception) -> Exception:
@@ -181,6 +283,11 @@ def user_facing_llm_message(exc: Exception) -> str:
 
 
 async def invoke_llm_with_fallback(messages, task_type: str = "general"):
+    """Try each available provider in order, returning the first success.
+
+    Gemini is served by `gemini_client` (no LangChain dependency).
+    Emergent still uses `langchain-openai`.
+    """
     last_error: Exception | None = None
 
     for provider in _provider_order():

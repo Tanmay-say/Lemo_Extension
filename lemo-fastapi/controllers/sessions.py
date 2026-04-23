@@ -9,6 +9,7 @@ from helpers.dev_store import (
     list_sessions as dev_list_sessions,
     use_dev_store,
 )
+from helpers.get_session_details import invalidate_session_details_cache
 
 
 async def save_message(req: Request):
@@ -63,6 +64,8 @@ async def save_message(req: Request):
                 }
             )
         
+        await invalidate_session_details_cache(session_id, user_id)
+
         return JSONResponse(
             status_code=201,
             content={

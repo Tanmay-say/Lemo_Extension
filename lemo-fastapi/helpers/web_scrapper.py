@@ -282,15 +282,31 @@ def _amazon_fields(soup: BeautifulSoup) -> dict:
     if title_el:
         out["title"] = _clean_title(title_el.get_text(strip=True))
 
-    price_container = soup.find("span", {"class": "a-price"})
-    if price_container:
-        whole = price_container.find("span", {"class": "a-price-whole"})
-        frac = price_container.find("span", {"class": "a-price-fraction"})
-        sym = price_container.find("span", {"class": "a-price-symbol"})
-        if whole:
-            parts = [x.get_text(strip=True) for x in (sym, whole, frac) if x]
-            if parts:
-                out["price"] = "".join(parts)
+    price_selectors = [
+        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+        "#corePrice_feature_div .a-price .a-offscreen",
+        "#apex_desktop .a-price .a-offscreen",
+        ".a-price.aok-align-center .a-offscreen",
+        ".a-price .a-offscreen",
+    ]
+    for selector in price_selectors:
+        price_el = soup.select_one(selector)
+        if price_el:
+            text = price_el.get_text(strip=True)
+            if text and re.search(r"\d", text):
+                out["price"] = text
+                break
+
+    if "price" not in out:
+        price_container = soup.find("span", {"class": "a-price"})
+        if price_container:
+            whole = price_container.find("span", {"class": "a-price-whole"})
+            frac = price_container.find("span", {"class": "a-price-fraction"})
+            sym = price_container.find("span", {"class": "a-price-symbol"})
+            if whole:
+                parts = [x.get_text(strip=True) for x in (sym, whole, frac) if x]
+                if parts:
+                    out["price"] = "".join(parts)
 
     rating = soup.find("span", {"class": "a-icon-alt"})
     if rating:

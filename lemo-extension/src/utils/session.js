@@ -24,6 +24,22 @@ const isTrackablePageUrl = (url = '') =>
   !url.startsWith('edge://') &&
   !url.startsWith('about:');
 
+const PAGE_SESSION_STORAGE_KEY = 'pageSessionMap';
+
+const normalizeSessionPageKey = (url = '') => {
+  if (!isTrackablePageUrl(url)) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch (error) {
+    console.error('Error normalizing page session key:', error);
+    return null;
+  }
+};
+
 /**
  * Get current tab URL and domain
  * @returns {Promise<{url: string, domain: string}>}
@@ -173,6 +189,45 @@ export const getCurrentSession = async () => {
     return result.currentSessionId || null;
   } catch (error) {
     console.error('Error getting current session:', error);
+    return null;
+  }
+};
+
+export const savePageSession = async (url, sessionId) => {
+  try {
+    const pageKey = normalizeSessionPageKey(url);
+    if (!pageKey) {
+      return;
+    }
+
+    const result = await chrome.storage.local.get([PAGE_SESSION_STORAGE_KEY]);
+    const pageSessionMap = result[PAGE_SESSION_STORAGE_KEY] || {};
+
+    if (sessionId) {
+      pageSessionMap[pageKey] = sessionId;
+    } else {
+      delete pageSessionMap[pageKey];
+    }
+
+    await chrome.storage.local.set({ [PAGE_SESSION_STORAGE_KEY]: pageSessionMap });
+  } catch (error) {
+    console.error('Error saving page session:', error);
+    throw error;
+  }
+};
+
+export const getPageSession = async (url) => {
+  try {
+    const pageKey = normalizeSessionPageKey(url);
+    if (!pageKey) {
+      return null;
+    }
+
+    const result = await chrome.storage.local.get([PAGE_SESSION_STORAGE_KEY]);
+    const pageSessionMap = result[PAGE_SESSION_STORAGE_KEY] || {};
+    return pageSessionMap[pageKey] || null;
+  } catch (error) {
+    console.error('Error getting page session:', error);
     return null;
   }
 };

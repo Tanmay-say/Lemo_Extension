@@ -1,16 +1,4 @@
-"""Scraper agent — second node in the LangGraph pipeline.
-
-Dispatches to one of two strategies based on `next_action`:
-
-    scrape_current_page  -> scrape the active tab and extract structured fields
-    discover_and_compare -> ScrapingBee Google SERP (Amazon + Flipkart) + rapidfuzz
-                            title filter against the reference product
-
-Emits:
-    state["current_product"]        -> structured data for the active page
-    state["current_page_context"]   -> raw chunks for Lemo grounding
-    state["scraped_data"]           -> ranked list of cross-platform matches
-"""
+"""Scraper agent — second node in the LangGraph pipeline."""
 
 from __future__ import annotations
 
@@ -35,36 +23,34 @@ except ImportError:  # pragma: no cover
     fuzz = None  # type: ignore
 
 
-# Any candidate scoring below this vs the reference title is dropped.
-# URL-slug fallback uses a lower floor because slugs are noisier than titles.
 MATCH_THRESHOLD = 65
 URL_SLUG_THRESHOLD = 55
-
-# Stop scraping candidates for a platform once we find one >= this score.
-EARLY_EXIT_SCORE = 90
-
-# Number of top SERP results to scrape per platform (higher = better recall,
-# slower response). Empirically 3 hits the sweet spot on Amazon/Flipkart.
 TOP_N_PER_PLATFORM = 3
-
-# Redis TTL for scraped product pages — comparison results are reusable for
-# ~12h before prices typically move on Amazon/Flipkart.
 SCRAPE_CACHE_TTL_SECONDS = 12 * 60 * 60
-
-# Shorter TTL for the active tab. Multi-turn chat on one page should reuse the
-# scrape, but we don't want to pin stale prices for too long.
 CURRENT_PAGE_CACHE_TTL_SECONDS = 15 * 60
+SCRAPE_CONCURRENCY = 4
+
+APPLIANCE_KEYWORDS = {
+    "refrigerator", "fridge", "double door", "single door", "frost free", "washing machine",
+    "air conditioner", "ac", "cooler", "television", "tv", "microwave", "oven",
+}
+FASHION_KEYWORDS = {
+    "shirt", "t-shirt", "dress", "jeans", "sneakers", "shoes", "watch", "kurta", "jacket",
+}
+BEAUTY_KEYWORDS = {
+    "lipstick", "serum", "cream", "makeup", "skincare", "perfume", "moisturizer",
+}
 
 _PLATFORM_CATALOG = [
-    {"name": "Amazon", "hosts": ["amazon.in", "amazon.com"], "aliases": ["amazon"]},
-    {"name": "Flipkart", "hosts": ["flipkart.com"], "aliases": ["flipkart"]},
-    {"name": "Myntra", "hosts": ["myntra.com"], "aliases": ["myntra"]},
-    {"name": "Ajio", "hosts": ["ajio.com", "allensolly.abfrl.in"], "aliases": ["ajio", "allen solly", "allensolly"]},
-    {"name": "Nykaa", "hosts": ["nykaa.com", "nykaafashion.com"], "aliases": ["nykaa", "nykaa fashion"]},
-    {"name": "Meesho", "hosts": ["meesho.com"], "aliases": ["meesho"]},
-    {"name": "Walmart", "hosts": ["walmart.com"], "aliases": ["walmart"]},
-    {"name": "eBay", "hosts": ["ebay.com"], "aliases": ["ebay", "e bay"]},
-    {"name": "Etsy", "hosts": ["etsy.com"], "aliases": ["etsy"]},
+    {"name": "Amazon", "hosts": ["amazon.in", "amazon.com"], "aliases": ["amazon"], "verticals": {"general", "appliances", "fashion", "beauty"}},
+    {"name": "Flipkart", "hosts": ["flipkart.com"], "aliases": ["flipkart"], "verticals": {"general", "appliances", "fashion", "electronics"}},
+    {"name": "Meesho", "hosts": ["meesho.com"], "aliases": ["meesho"], "verticals": {"general", "appliances", "fashion", "beauty"}},
+    {"name": "Myntra", "hosts": ["myntra.com"], "aliases": ["myntra"], "verticals": {"fashion"}},
+    {"name": "Ajio", "hosts": ["ajio.com", "allensolly.abfrl.in"], "aliases": ["ajio", "allen solly", "allensolly"], "verticals": {"fashion"}},
+    {"name": "Nykaa", "hosts": ["nykaa.com", "nykaafashion.com"], "aliases": ["nykaa", "nykaa fashion"], "verticals": {"beauty", "fashion"}},
+    {"name": "Walmart", "hosts": ["walmart.com"], "aliases": ["walmart"], "verticals": {"general", "appliances"}},
+    {"name": "eBay", "hosts": ["ebay.com"], "aliases": ["ebay", "e bay"], "verticals": {"general", "appliances", "fashion"}},
+    {"name": "Etsy", "hosts": ["etsy.com"], "aliases": ["etsy"], "verticals": {"general", "fashion"}},
 ]
 
 
@@ -85,55 +71,125 @@ def _platform_name_for_url(url: str) -> str:
     return platform["name"] if platform else "Unknown"
 
 
-def _default_platforms_for_url(url: str) -> list[dict]:
-    host = urlparse(url).netloc.lower() if url else ""
-    current_platform = _platform_for_host(host)
+def _token_set(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) > 1}
+
+
+def _infer_vertical(*texts: str) -> str:
+    tokens = set()
+    for text in texts:
+        tokens |= _token_set(text)
+    joined = " ".join(sorted(tokens))
+    if any(keyword in joined for keyword in APPLIANCE_KEYWORDS):
+        return "appliances"
+    if any(keyword in joined for keyword in BEAUTY_KEYWORDS):
+        return "beauty"
+    if any(keyword in joined for keyword in FASHION_KEYWORDS):
+        return "fashion"
+    return "general"
+
+
+def _default_platform_names(vertical: str, current_url: str) -> list[str]:
+    host = urlparse(current_url).netloc.lower() if current_url else ""
     india = host.endswith(".in") or any(token in host for token in ("flipkart", "myntra", "ajio", "nykaa", "meesho"))
-    names = (
-        ["Amazon", "Flipkart", "Myntra", "Ajio", "Nykaa", "Meesho"]
-        if india else
-        ["Amazon", "Walmart", "eBay", "Etsy"]
-    )
-    selected: list[dict] = []
-    seen: set[str] = set()
-    if current_platform:
-        selected.append(current_platform)
-        seen.add(current_platform["name"])
-    for platform in _PLATFORM_CATALOG:
-        if platform["name"] in names and platform["name"] not in seen:
-            selected.append(platform)
-            seen.add(platform["name"])
-    return selected
+    if vertical == "appliances":
+        return ["Amazon", "Flipkart", "Meesho"] if india else ["Amazon", "Walmart", "eBay"]
+    if vertical == "fashion":
+        return ["Myntra", "Ajio", "Amazon", "Meesho"] if india else ["Amazon", "eBay", "Etsy"]
+    if vertical == "beauty":
+        return ["Nykaa", "Amazon", "Meesho"] if india else ["Amazon", "eBay"]
+    return ["Amazon", "Flipkart", "Meesho"] if india else ["Amazon", "Walmart", "eBay"]
 
 
-def _platforms_for_query(user_query: str, current_url: str) -> list[dict]:
+def _platforms_for_query(user_query: str, current_url: str, current_product: dict | None) -> list[dict]:
     lowered = (user_query or "").lower()
-    selected: list[dict] = []
-    seen: set[str] = set()
-    explicit_match = False
-
     current_platform = _platform_for_host(urlparse(current_url).netloc.lower() if current_url else "")
-    if current_platform:
-        selected.append(current_platform)
-        seen.add(current_platform["name"])
+    vertical = _infer_vertical(user_query, (current_product or {}).get("title", ""), current_url)
 
+    mentioned: list[dict] = []
+    for platform in _PLATFORM_CATALOG:
+        aliases = [platform["name"].lower(), *platform["aliases"]]
+        if any(alias in lowered for alias in aliases):
+            if vertical in platform["verticals"] or "general" in platform["verticals"]:
+                mentioned.append(platform)
+
+    only_markers = (" only", " only.", " only ", " just ", " specifically ")
+    if mentioned and any(marker in lowered for marker in only_markers):
+        return mentioned
+
+    if mentioned:
+        names = {platform["name"] for platform in mentioned}
+        if current_platform and current_platform["name"] not in names and (vertical in current_platform["verticals"] or "general" in current_platform["verticals"]):
+            mentioned.insert(0, current_platform)
+        return mentioned
+
+    defaults = []
+    wanted_names = set(_default_platform_names(vertical, current_url))
+    if current_platform and current_platform["name"] in wanted_names:
+        defaults.append(current_platform)
+    seen = {p["name"] for p in defaults}
     for platform in _PLATFORM_CATALOG:
         if platform["name"] in seen:
             continue
-        aliases = [platform["name"].lower(), *platform["aliases"]]
-        if any(alias in lowered for alias in aliases):
-            selected.append(platform)
+        if platform["name"] in wanted_names and (vertical in platform["verticals"] or "general" in platform["verticals"]):
+            defaults.append(platform)
             seen.add(platform["name"])
-            explicit_match = True
-
-    if explicit_match:
-        return selected
-    return _default_platforms_for_url(current_url)
+    return defaults
 
 
-# ---------------------------------------------------------------------------
-# Helpers — shared with cases/asking.py (kept independent to avoid coupling)
-# ---------------------------------------------------------------------------
+def _query_refers_to_current_product(user_query: str, current_product: dict | None) -> bool:
+    lowered = (user_query or "").lower()
+    if any(token in lowered for token in (
+        "this product", "this item", "current product", "same product", "similar product",
+        "same features", "with respect to", "difference", "compare", "alternative", "cheaper",
+    )):
+        return True
+    title = (current_product or {}).get("title") or ""
+    model_hint = _extract_model_hint(title)
+    return bool(model_hint and model_hint.lower() in lowered)
+
+
+def _budget_cap_from_query(user_query: str, current_product: dict | None) -> float | None:
+    lowered = (user_query or "").lower()
+
+    if "price cap as this current product" in lowered or "price cap as this product" in lowered:
+        return _price_value((current_product or {}).get("price"))
+
+    between = re.search(r"between\s*(?:rs\.?|₹)?\s*([\d,]+)\s*(?:to|-)\s*(?:rs\.?|₹)?\s*([\d,]+)", lowered)
+    if between:
+        try:
+            return float(between.group(2).replace(",", ""))
+        except ValueError:
+            return None
+
+    under = re.search(r"(?:under|below|less than|max(?:imum)?(?: budget)?|upto|up to)\s*(?:rs\.?|₹)?\s*([\d,]+)", lowered)
+    if under:
+        try:
+            return float(under.group(1).replace(",", ""))
+        except ValueError:
+            return None
+
+    return None
+
+
+def _price_value(raw_price: Optional[str]) -> float | None:
+    if raw_price is None:
+        return None
+    if isinstance(raw_price, (int, float)):
+        return float(raw_price)
+    text = str(raw_price).replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _is_recommendation_query(user_query: str) -> bool:
+    lowered = (user_query or "").lower()
+    return any(token in lowered for token in ("suggest", "recommend", "best ", "budget", "buy a ", "i want to buy", "looking for"))
 
 
 def _extract_field(label: str, context_text: str) -> Optional[str]:
@@ -193,13 +249,8 @@ def _payload_from_chunks(url: str, chunks: list[str]) -> ScrapedProduct:
         "features": features[:800],
         "image": "",
         "url": url,
-        "match_score": 100.0,  # overridden for cross-platform matches
+        "match_score": 100.0,
     }
-
-
-# ---------------------------------------------------------------------------
-# Strategy 1 — scrape the active tab
-# ---------------------------------------------------------------------------
 
 
 _NON_SCRAPABLE = (
@@ -224,9 +275,6 @@ async def _scrape_current_page(state: LemoState) -> dict:
             "errors": (state.get("errors") or []) + ["scraper: non-scrapable URL"],
         }
 
-    # Multi-turn chat on the same URL should reuse the scrape rather than
-    # spending another 10-12s on ScrapingBee. Cache both the structured product
-    # and the raw context so the Lemo agent gets identical grounding on replay.
     cached = await _load_scraped_cache(url, namespace="current_page")
     if cached and cached.get("current_product"):
         logger.info(
@@ -252,20 +300,10 @@ async def _scrape_current_page(state: LemoState) -> dict:
         }
 
     if not chunks:
-        return {
-            "current_product": None,
-            "current_page_context": "",
-            "scraped_data": [],
-        }
+        return {"current_product": None, "current_page_context": "", "scraped_data": []}
 
     product = _payload_from_chunks(url, chunks if isinstance(chunks, list) else [chunks])
     context_text = "\n\n".join(chunks[:5]) if isinstance(chunks, list) else str(chunks)
-
-    logger.info(
-        "[agent=scraper] current-page ok: title=%r price=%s",
-        (product.get("title") or "")[:60],
-        product.get("price"),
-    )
 
     result = {
         "current_product": product,
@@ -274,17 +312,8 @@ async def _scrape_current_page(state: LemoState) -> dict:
     }
 
     if product.get("title"):
-        await _store_scraped_cache(
-            url, result, ttl_seconds=CURRENT_PAGE_CACHE_TTL_SECONDS,
-            namespace="current_page",
-        )
-
+        await _store_scraped_cache(url, result, ttl_seconds=CURRENT_PAGE_CACHE_TTL_SECONDS, namespace="current_page")
     return result
-
-
-# ---------------------------------------------------------------------------
-# Strategy 2 — cross-platform discover & compare
-# ---------------------------------------------------------------------------
 
 
 def _fuzzy_score(reference: str, candidate: str) -> float:
@@ -298,12 +327,6 @@ def _fuzzy_score(reference: str, candidate: str) -> float:
 
 
 def _url_slug_tokens(url: str) -> str:
-    """Extract a human-readable slug from a product URL for fuzzy fallback.
-
-    Flipkart URLs look like /apple-iphone-17e-white-512-gb/p/itm... ; Amazon
-    ones like /Apple-iPhone-17e-512-GB/dp/... . The slug is the last
-    informative segment before `/p/` or `/dp/`.
-    """
     try:
         path = urlparse(url).path
     except Exception:
@@ -323,29 +346,15 @@ def _url_slug_tokens(url: str) -> str:
     return slug
 
 
-# ---------------------------------------------------------------------------
-# Redis-backed scraped-page cache (12h TTL)
-# ---------------------------------------------------------------------------
-
-
 def _scrape_cache_key(url: str, namespace: str = "product") -> str:
     return f"scrape:{namespace}:{hashlib.md5(url.encode('utf-8')).hexdigest()}"
 
 
 async def _load_scraped_cache(url: str, namespace: str = "product") -> Optional[dict]:
     try:
-        from helpers.redis_functions import get_redis_connection
+        from helpers import runtime_cache
 
-        r = await get_redis_connection()
-        try:
-            raw = await r.get(_scrape_cache_key(url, namespace))
-        finally:
-            await r.close()
-        if not raw:
-            return None
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        return json.loads(raw)
+        return await runtime_cache.get_json(_scrape_cache_key(url, namespace))
     except Exception as exc:
         logger.debug("[agent=scraper] scrape cache read skipped: %s", exc)
         return None
@@ -358,27 +367,14 @@ async def _store_scraped_cache(
     namespace: str = "product",
 ) -> None:
     try:
-        from helpers.redis_functions import get_redis_connection
+        from helpers import runtime_cache
 
-        r = await get_redis_connection()
-        try:
-            await r.setex(
-                _scrape_cache_key(url, namespace), ttl_seconds, json.dumps(payload)
-            )
-        finally:
-            await r.close()
+        await runtime_cache.set_json(_scrape_cache_key(url, namespace), payload, ttl_seconds)
     except Exception as exc:
         logger.debug("[agent=scraper] scrape cache write skipped: %s", exc)
 
 
 async def _scrape_and_score(url: str, reference_title: str) -> Optional[ScrapedProduct]:
-    """Scrape one candidate URL and score it against the reference title.
-
-    Uses a 12h Redis cache keyed by URL. When the extractor can't find a
-    title (common for JS-heavy sites on the first hit), we fall back to
-    scoring the URL slug so genuinely-relevant candidates aren't dropped
-    to score=0.
-    """
     cached = await _load_scraped_cache(url)
     if cached:
         cached = dict(cached)  # type: ignore[arg-type]
@@ -387,7 +383,7 @@ async def _scrape_and_score(url: str, reference_title: str) -> Optional[ScrapedP
             slug = _url_slug_tokens(url)
             slug_score = _fuzzy_score(reference_title, slug)
             if slug_score > score:
-                score = slug_score * 0.85  # discount slug-only matches
+                score = slug_score * 0.85
         cached["match_score"] = round(score, 2)
         logger.info("[agent=scraper] cache hit %s score=%.1f", url[:90], score)
         return cached  # type: ignore[return-value]
@@ -404,10 +400,6 @@ async def _scrape_and_score(url: str, reference_title: str) -> Optional[ScrapedP
     title_score = _fuzzy_score(reference_title, payload.get("title") or "")
     final_score = title_score
 
-    # URL-slug fallback: many SPAs (Flipkart first paint, Myntra, etc.) hand
-    # us an empty title on one pass. Rather than drop a legitimate candidate,
-    # score its slug against the reference and apply a 0.85x discount so
-    # title-hit pages still win ties.
     if not payload.get("title") or title_score < URL_SLUG_THRESHOLD:
         slug = _url_slug_tokens(url)
         slug_score = _fuzzy_score(reference_title, slug) * 0.85
@@ -421,8 +413,29 @@ async def _scrape_and_score(url: str, reference_title: str) -> Optional[ScrapedP
     return payload
 
 
+def _payload_within_budget(payload: ScrapedProduct, budget_cap: float | None) -> bool:
+    if budget_cap is None:
+        return True
+    value = _price_value(payload.get("price"))
+    return value is not None and value <= budget_cap
+
+
+def _payload_matches_vertical(payload: ScrapedProduct, vertical: str) -> bool:
+    if vertical == "general":
+        return True
+    title = (payload.get("title") or "").lower()
+    description = (payload.get("description") or "").lower()
+    haystack = f"{title} {description}"
+    if vertical == "appliances":
+        return any(keyword in haystack for keyword in APPLIANCE_KEYWORDS)
+    if vertical == "fashion":
+        return any(keyword in haystack for keyword in FASHION_KEYWORDS)
+    if vertical == "beauty":
+        return any(keyword in haystack for keyword in BEAUTY_KEYWORDS)
+    return True
+
+
 async def _discover_and_compare(state: LemoState) -> dict:
-    # 1) Ensure we know the reference product — scrape current page if we haven't already.
     current_product = state.get("current_product")
     current_context = state.get("current_page_context", "")
     if current_product is None:
@@ -430,18 +443,18 @@ async def _discover_and_compare(state: LemoState) -> dict:
         current_product = sub.get("current_product")
         current_context = sub.get("current_page_context", "")
 
+    user_query = state.get("user_query", "") or ""
+    anchored_to_current = _query_refers_to_current_product(user_query, current_product)
+    budget_cap = _budget_cap_from_query(user_query, current_product)
+    vertical = _infer_vertical(user_query, (current_product or {}).get("title", ""), current_context)
+
     reference_title = (current_product or {}).get("title") or ""
     query_for_scraper = state.get("query_for_scraper") or ""
-    user_query = state.get("user_query", "") or ""
-
-    # 2) Build a CLEAN query — prefer the title from scraped data, not raw user text.
-    search_query = query_for_scraper.strip() or reference_title.strip()
-    if not search_query:
-        # Fall back to user's words only as a last resort.
-        search_query = user_query.strip()
-    model_hint = _extract_model_hint(reference_title) or _extract_model_hint(current_context)
-    if model_hint and model_hint.lower() not in search_query.lower():
-        search_query = f"{search_query} {model_hint}".strip()
+    search_query = (query_for_scraper if query_for_scraper.strip() else (reference_title if anchored_to_current else user_query)).strip()
+    if anchored_to_current:
+        model_hint = _extract_model_hint(reference_title) or _extract_model_hint(current_context)
+        if model_hint and model_hint.lower() not in search_query.lower():
+            search_query = f"{search_query} {model_hint}".strip()
 
     if not search_query:
         return {
@@ -451,26 +464,23 @@ async def _discover_and_compare(state: LemoState) -> dict:
             "errors": (state.get("errors") or []) + ["scraper: no search query"],
         }
 
-    # 3) Decide which platforms to query — if the user named one explicitly, respect it.
-    platforms = _platforms_for_query(user_query, state.get("current_page_url", "") or "")
-
+    platforms = _platforms_for_query(user_query, state.get("current_page_url", "") or "", current_product)
     logger.info(
-        "[agent=scraper] discover_and_compare query=%r platforms=%s",
-        search_query[:80],
+        "[agent=scraper] discover_and_compare query=%r platforms=%s anchored=%s budget_cap=%s vertical=%s",
+        search_query[:100],
         [p["name"] for p in platforms],
+        anchored_to_current,
+        budget_cap,
+        vertical,
     )
 
-    # 4) Run SERP per platform in parallel, collect a global candidate list,
-    #    dedup, then scrape every candidate concurrently. That's materially
-    #    faster than the old sequential-per-platform loop and lets us early-
-    #    exit as soon as a strong match lands.
     current_url = state.get("current_page_url", "") or ""
     current_platform_name = _platform_name_for_url(current_url)
 
     async def _candidates_for(platform: dict) -> list[tuple[str, str]]:
         platform_name = platform["name"]
         urls: list[str] = []
-        if platform_name == current_platform_name and current_url:
+        if anchored_to_current and platform_name == current_platform_name and current_url:
             urls.append(current_url)
         for host in platform["hosts"]:
             serp = await google_serp_search(search_query, site=host, limit=TOP_N_PER_PLATFORM)
@@ -485,11 +495,7 @@ async def _discover_and_compare(state: LemoState) -> dict:
             deduped.append(candidate_url)
         return [(platform_name, u) for u in deduped[:TOP_N_PER_PLATFORM]]
 
-    candidate_groups = await asyncio.gather(
-        *[_candidates_for(platform) for platform in platforms],
-        return_exceptions=False,
-    )
-    # Flatten + dedup URLs while preserving first-platform-seen ordering.
+    candidate_groups = await asyncio.gather(*[_candidates_for(platform) for platform in platforms], return_exceptions=False)
     seen_urls: set[str] = set()
     candidates: list[tuple[str, str]] = []
     for group in candidate_groups:
@@ -500,81 +506,55 @@ async def _discover_and_compare(state: LemoState) -> dict:
             candidates.append((platform_name, url))
 
     if not candidates:
-        logger.info("[agent=scraper] no SERP candidates for %r", search_query[:80])
-        return {
-            "current_product": current_product,
-            "current_page_context": current_context,
-            "scraped_data": [],
-        }
+        return {"current_product": current_product, "current_page_context": current_context, "scraped_data": []}
 
-    logger.info(
-        "[agent=scraper] scraping %d candidates in parallel (platforms=%s)",
-        len(candidates), [p["name"] for p in platforms],
-    )
+    logger.info("[agent=scraper] scraping %d candidates in parallel (platforms=%s)", len(candidates), [p["name"] for p in platforms])
+
+    semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+    reference = reference_title or search_query
 
     async def _score_one(platform_name: str, url: str) -> Optional[ScrapedProduct]:
-        payload = await _scrape_and_score(url, reference_title or search_query)
+        async with semaphore:
+            payload = await _scrape_and_score(url, reference)
         if not payload:
             return None
         payload["platform"] = platform_name
         return payload
 
-    scrape_tasks = [_score_one(name, url) for name, url in candidates]
-    raw_results: list[Optional[ScrapedProduct]] = await asyncio.gather(
-        *scrape_tasks, return_exceptions=False
-    )
+    raw_results: list[Optional[ScrapedProduct]] = await asyncio.gather(*[_score_one(name, url) for name, url in candidates], return_exceptions=False)
 
-    # Group by platform, keep best-scoring candidate per platform.
     best_by_platform: dict[str, ScrapedProduct] = {}
-    if current_product and current_product.get("title"):
+    if anchored_to_current and current_product and current_product.get("title") and _payload_within_budget(current_product, budget_cap):
         seeded = dict(current_product)
         seeded["platform"] = current_product.get("platform") or current_platform_name or "Current Site"
         seeded["match_score"] = 100.0
         best_by_platform[seeded["platform"]] = seeded  # type: ignore[assignment]
+
     for payload in raw_results:
         if not payload:
             continue
         platform = payload.get("platform") or "Unknown"
-        if payload["match_score"] < MATCH_THRESHOLD and reference_title:
-            logger.info(
-                "[agent=scraper] drop %-8s score=%.1f < %d title=%r",
-                platform,
-                payload["match_score"],
-                MATCH_THRESHOLD,
-                (payload.get("title") or "")[:60],
-            )
+        if reference and payload["match_score"] < MATCH_THRESHOLD:
+            logger.info("[agent=scraper] drop %-8s score=%.1f < %d title=%r", platform, payload["match_score"], MATCH_THRESHOLD, (payload.get("title") or "")[:60])
+            continue
+        if not _payload_matches_vertical(payload, vertical):
+            logger.info("[agent=scraper] drop %-8s wrong vertical title=%r", platform, (payload.get("title") or "")[:70])
+            continue
+        if not _payload_within_budget(payload, budget_cap):
+            logger.info("[agent=scraper] drop %-8s over budget price=%s cap=%s", platform, payload.get("price"), budget_cap)
             continue
         current = best_by_platform.get(platform)
         if current is None or payload["match_score"] > current.get("match_score", 0):
             best_by_platform[platform] = payload
-            logger.info(
-                "[agent=scraper] keep %-8s score=%.1f price=%s title=%r",
-                platform,
-                payload["match_score"],
-                payload.get("price") or "-",
-                (payload.get("title") or "")[:60],
-            )
+            logger.info("[agent=scraper] keep %-8s score=%.1f price=%s title=%r", platform, payload["match_score"], payload.get("price") or "-", (payload.get("title") or "")[:60])
 
-    # Preserve the order in which platforms were requested so UI stays stable.
-    scraped_data: list[ScrapedProduct] = [
-        best_by_platform[platform["name"]] for platform in platforms if platform["name"] in best_by_platform
-    ]
-
-    logger.info(
-        "[agent=scraper] discover_and_compare finished: %d matches across %d platforms",
-        len(scraped_data), len(platforms),
-    )
+    scraped_data: list[ScrapedProduct] = [best_by_platform[p["name"]] for p in platforms if p["name"] in best_by_platform]
 
     return {
         "current_product": current_product,
         "current_page_context": current_context,
         "scraped_data": scraped_data,
     }
-
-
-# ---------------------------------------------------------------------------
-# LangGraph node entry point
-# ---------------------------------------------------------------------------
 
 
 async def scraper_agent_node(state: LemoState) -> dict:

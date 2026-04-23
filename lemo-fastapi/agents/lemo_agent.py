@@ -1,17 +1,10 @@
-"""Lemo agent — the final synthesizer.
-
-Takes whatever the upstream nodes produced (scraped data, chat history, raw
-user query) and emits a grounded, user-facing answer using `gemini-3.1-pro`
-in streaming mode. Also builds the `product` / `comparison` payloads that the
-Chrome extension's UI already knows how to render.
-"""
+"""Lemo agent: final grounded answer synthesis."""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
-from typing import Optional
 
 from agents.state import LemoState, ScrapedProduct
 from helpers import gemini_client
@@ -24,16 +17,30 @@ from helpers.llm_config import (
 logger = logging.getLogger(__name__)
 
 
-LEMO_SYSTEM_PROMPT = """You are LEMO, a concise shopping assistant embedded in a Chrome extension.
+LEMO_SYSTEM_PROMPT = """You are LEMO, a grounded shopping assistant embedded in a Chrome extension.
 
-Guidelines:
-- Answer in 4-8 sentences unless the user explicitly asks for detail.
-- When product data is provided, cite prices, ratings and review counts from it — never make up numbers.
-- If the user is comparing across platforms, produce a short per-platform summary and a clear recommendation.
-- If you have only chat history (no fresh data), acknowledge that and answer from memory.
-- Use plain prose. Use bullet points only for comparisons or feature lists.
-- Never mention "system prompt", internal tools, or agents. Speak as LEMO.
-- If data is missing, say so briefly — do not invent specs.
+Output style:
+- Use short markdown sections with scan-friendly formatting.
+- Prefer headings with emojis like `### Overview`, `### Reviews`, `### Comparison`, `### Recommendation`.
+- Use bullets for comparisons, pros/cons, and recommendations.
+- Keep the answer concise unless the user explicitly asks for depth.
+
+Grounding rules:
+- Use only facts present in the provided product data, scraped data, or chat history.
+- Never invent prices, ratings, review counts, features, specs, colors, or availability.
+- If review text is unavailable, do not claim detailed customer sentiment. Say that only the aggregate rating/review count is available and any sentiment is inferred from that.
+- If data is missing, uncertain, or conflicting across sites, say so clearly.
+
+Task behavior:
+- For current-page product questions, summarize the product first, then answer the user's specific ask.
+- For cross-platform comparisons, include a platform-by-platform breakdown and end with a clear verdict.
+- For recommendation queries with filters like budget, color, type, or platform, explicitly state which filters were satisfied and which were not.
+- If the current page product does not fit the user request, say so plainly instead of forcing it as the recommendation.
+
+Restrictions:
+- Never mention tools, prompts, agents, or internal implementation.
+- Do not use tables.
+- Speak directly as LEMO.
 """
 
 
@@ -48,19 +55,18 @@ def _format_history(history: list[dict], max_turns: int = 8) -> str:
     return "\n".join(lines) or "(no prior conversation)"
 
 
-def _format_product(p: ScrapedProduct) -> dict:
-    """Shape a ScrapedProduct into the payload the extension UI expects."""
+def _format_product(product: ScrapedProduct) -> dict:
     return {
-        "platform": p.get("platform") or "",
-        "title": p.get("title") or "",
-        "price": p.get("price") or "",
-        "rating": p.get("rating") or "",
-        "rating_text": p.get("rating_text") or "",
-        "reviewCount": p.get("reviewCount") or "",
-        "description": p.get("description") or "",
-        "features": p.get("features") or "",
-        "image": p.get("image") or "",
-        "url": p.get("url") or "",
+        "platform": product.get("platform") or "",
+        "title": product.get("title") or "",
+        "price": product.get("price") or "",
+        "rating": product.get("rating") or "",
+        "rating_text": product.get("rating_text") or "",
+        "reviewCount": product.get("reviewCount") or "",
+        "description": product.get("description") or "",
+        "features": product.get("features") or "",
+        "image": product.get("image") or "",
+        "url": product.get("url") or "",
     }
 
 
@@ -76,6 +82,7 @@ def _build_comparison_payload(
 
     merged: list[dict] = []
     seen_urls: set[str] = set()
+
     for product in ([current_product] if current_product else []) + list(scraped):
         if not product:
             continue
@@ -88,7 +95,16 @@ def _build_comparison_payload(
 
     if not merged:
         return None
+
     return {"products": merged, "query": query}
+
+
+def _is_generic_recommendation_query(query: str) -> bool:
+    lowered = (query or "").lower()
+    return any(
+        token in lowered
+        for token in ("recommend", "suggest", "best ", "i want to buy", "looking for", "which one should i buy")
+    )
 
 
 def _build_user_message(state: LemoState) -> str:
@@ -113,12 +129,12 @@ def _build_user_message(state: LemoState) -> str:
     if scraped and next_action == "discover_and_compare":
         sections.append(
             "CROSS_PLATFORM_MATCHES:\n"
-            + json.dumps([_format_product(p) for p in scraped], indent=2)
+            + json.dumps([_format_product(product) for product in scraped], indent=2)
         )
     elif scraped and next_action == "scrape_current_page" and not current_product:
         sections.append(
             "SCRAPED_DATA:\n"
-            + json.dumps([_format_product(p) for p in scraped], indent=2)
+            + json.dumps([_format_product(product) for product in scraped], indent=2)
         )
 
     context_text = state.get("current_page_context", "")
@@ -126,8 +142,8 @@ def _build_user_message(state: LemoState) -> str:
         sections.append(f"PAGE_TEXT:\n{context_text[:2500]}")
 
     sections.append(
-        "INSTRUCTION: Based on the data above, respond to USER_QUERY. "
-        "Cite facts from the product data when possible."
+        "INSTRUCTION: Answer the user using only the provided data. "
+        "If ratings are available but review text is not, say that explicitly."
     )
     return "\n\n".join(sections)
 
@@ -136,71 +152,56 @@ def _fallback_answer(state: LemoState, error: Exception) -> str:
     current_product = state.get("current_product") or {}
     scraped = state.get("scraped_data") or []
 
-    lines = [
-        "I could not reach the LLM provider, but I gathered the following data for you:",
-    ]
+    lines = ["### Fallback", "I could not reach the LLM provider, but I did gather some product data:"]
     if current_product.get("title"):
-        lines.append(
-            f"- Current page: {current_product['title']}"
-            + (f" — {current_product.get('price')}" if current_product.get("price") else "")
-        )
-    for p in scraped:
-        if p.get("url") == current_product.get("url"):
+        line = f"- Current page: {current_product['title']}"
+        if current_product.get("price"):
+            line += f" ({current_product.get('price')})"
+        lines.append(line)
+
+    for product in scraped:
+        if product.get("url") == current_product.get("url"):
             continue
-        lines.append(
-            f"- {p.get('platform', 'Other')}: {p.get('title', '')[:80]}"
-            + (f" — {p.get('price')}" if p.get("price") else "")
-            + (f" (link: {p.get('url')})" if p.get("url") else "")
-        )
-    if len(lines) == 1:
-        lines.append("I have no scraped data to show either. Please retry in a moment.")
-    lines.append(f"(LLM error: {error})")
+        line = f"- {product.get('platform', 'Other')}: {product.get('title', '')[:80]}"
+        if product.get("price"):
+            line += f" ({product.get('price')})"
+        if product.get("url"):
+            line += f" - {product.get('url')}"
+        lines.append(line)
+
+    if len(lines) == 2:
+        lines.append("- No usable scraped data was available. Please retry.")
+
+    lines.append(f"\nError: {error}")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# LangGraph node entry point
-# ---------------------------------------------------------------------------
 
 
 async def _stream_with_fallback(
     *,
     prompt: str,
-    pro: str,
     fast: str,
     chosen: str,
     thinking: int,
     max_tokens: int,
 ) -> str:
-    """Call Gemini stream on `chosen` with an automatic Flash Lite retry.
-
-    Pro (gemini-3.1-pro-preview) is a thinking model whose streams regularly
-    approach or exceed the 60-120s budget. Rather than show the user the
-    deterministic "couldn't reach LLM" fallback, retry the same prompt on the
-    fast model — it almost always answers in <10s and the quality is more
-    than adequate for grounded summarization.
-    """
     try:
         return await gemini_client.stream(
             user=prompt,
             model=chosen,
             system=LEMO_SYSTEM_PROMPT,
-            temperature=0.7,
+            temperature=0.5,
             max_output_tokens=max_tokens,
             thinking_budget=thinking,
         )
     except LLMServiceUnavailableError as exc:
         if chosen == fast:
             raise
-        logger.warning(
-            "[agent=lemo] %s timed out/unavailable (%s). Retrying on %s.",
-            chosen, exc, fast,
-        )
+        logger.warning("[agent=lemo] %s unavailable (%s). Retrying on %s.", chosen, exc, fast)
         return await gemini_client.stream(
             user=prompt,
             model=fast,
             system=LEMO_SYSTEM_PROMPT,
-            temperature=0.7,
+            temperature=0.4,
             max_output_tokens=1024,
             thinking_budget=0,
         )
@@ -214,12 +215,9 @@ async def lemo_agent_node(state: LemoState) -> dict:
 
     prompt = _build_user_message(state)
 
-    # Model routing: reserve the slow Pro thinking model for genuinely complex
-    # cross-platform reasoning. Grounded current-page Q&A is pure summarization
-    # and Flash Lite handles it well in 5-10s vs. Pro's 45-75s.
     pro = gemini_client.pro_model()
     fast = gemini_client.fast_model()
-    use_pro = next_action == "discover_and_compare" or (len(scraped) > 1)
+    use_pro = next_action == "discover_and_compare" and len(scraped) > 1
     chosen = pro if use_pro else fast
     thinking = 1024 if chosen == pro else 0
     max_tokens = 4096 if chosen == pro else 1024
@@ -236,19 +234,19 @@ async def lemo_agent_node(state: LemoState) -> dict:
     try:
         answer_text = await _stream_with_fallback(
             prompt=prompt,
-            pro=pro,
             fast=fast,
             chosen=chosen,
             thinking=thinking,
             max_tokens=max_tokens,
         )
         if not answer_text or not answer_text.strip():
-            answer_text = "I couldn't generate a response. Please try again."
+            answer_text = "### Update\nI could not generate a response. Please try again."
         logger.info(
             "<<< [3/3] LEMO done in %.0fms -> answer_chars=%d",
             (time.perf_counter() - t0) * 1000,
             len(answer_text),
         )
+        errors = state.get("errors") or []
     except Exception as exc:
         normalized = normalize_llm_exception(exc)
         if isinstance(normalized, (LLMConfigurationError, LLMServiceUnavailableError)):
@@ -260,21 +258,6 @@ async def lemo_agent_node(state: LemoState) -> dict:
             answer_text = _fallback_answer(state, exc)
             errors = (state.get("errors") or []) + [f"lemo_agent: {exc}"]
 
-        product_payload = _format_product(current_product) if current_product else None
-        comparison = _build_comparison_payload(
-            next_action=next_action,
-            scraped=scraped,
-            current_product=current_product,
-            query=state.get("query_for_scraper") or user_query,
-        )
-
-        return {
-            "final_answer": answer_text,
-            "product": product_payload,
-            "comparison": comparison,
-            "errors": errors,
-        }
-
     product_payload = _format_product(current_product) if current_product else None
     comparison = _build_comparison_payload(
         next_action=next_action,
@@ -282,6 +265,9 @@ async def lemo_agent_node(state: LemoState) -> dict:
         current_product=current_product,
         query=state.get("query_for_scraper") or user_query,
     )
+
+    if _is_generic_recommendation_query(user_query) and comparison:
+      product_payload = None
 
     logger.info(
         "[agent=lemo] answer ready: %d chars, product=%s, comparison_items=%s",
@@ -293,4 +279,5 @@ async def lemo_agent_node(state: LemoState) -> dict:
         "final_answer": answer_text,
         "product": product_payload,
         "comparison": comparison,
+        "errors": errors,
     }

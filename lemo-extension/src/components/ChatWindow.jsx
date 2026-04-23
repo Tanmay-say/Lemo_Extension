@@ -9,8 +9,26 @@ import FeedbackCard from './FeedbackCard';
 import ComparisonTable from './ComparisonTable';
 import CurrentPageIndicator from './CurrentPageIndicator';
 import { checkUserExists, getAuthHeader, getConnectedWallet, loginWithSIWE } from '../utils/auth.js';
-import { createSession, getCurrentSession, getCurrentTabInfo, getSessionDetails, saveCurrentSession, sendChatMessage } from '../utils/session.js';
+import {
+  createSession,
+  getCurrentSession,
+  getCurrentTabInfo,
+  getPageSession,
+  getSessionDetails,
+  saveCurrentSession,
+  savePageSession,
+  sendChatMessage,
+} from '../utils/session.js';
 import { submitFeedback } from '../services/fvmService.js';
+
+const WELCOME_MESSAGE = 'Hello! I am your Lemo AI Assistant. I can help you understand products, compare prices, and shortlist better alternatives across platforms.';
+
+const buildUiMessage = (message) => ({
+  id: message.id,
+  type: message.message_type === 'user' ? 'user' : 'bot',
+  content: message.message,
+  timestamp: message.created_at,
+});
 
 const ChatWindow = () => {
   const [messages, setMessages] = useState([]);
@@ -100,6 +118,57 @@ const ChatWindow = () => {
       && !url.startsWith('about:')
   );
 
+  const createWelcomeMessage = (content = WELCOME_MESSAGE) => ({
+    id: `welcome-${Date.now()}`,
+    type: 'bot',
+    content,
+    timestamp: new Date().toISOString(),
+  });
+
+  const createContextSwitchMessage = (domain) => ({
+    id: `page-switch-${Date.now()}`,
+    type: 'bot',
+    content: `### 🔄 Context updated\nYou are now browsing **${domain}**. I switched to this page's chat context so comparisons and recommendations stay tied to the current product.`,
+    timestamp: new Date().toISOString(),
+  });
+
+  const loadSessionMessages = async (wallet, activeSessionId, { appendContextMessage = null } = {}) => {
+    if (!activeSessionId) {
+      const baseMessages = [createWelcomeMessage()];
+      if (appendContextMessage) {
+        baseMessages.push(appendContextMessage);
+      }
+      setMessages(baseMessages);
+      return;
+    }
+
+    const sessionData = await getSessionDetails(wallet, activeSessionId);
+    const history = sessionData?.session?.chat_messages || [];
+    const formattedMessages = history.length ? history.map(buildUiMessage) : [createWelcomeMessage()];
+    if (appendContextMessage) {
+      formattedMessages.push(appendContextMessage);
+    }
+    setMessages(formattedMessages);
+  };
+
+  const ensureSessionForPage = async (wallet, tabInfo, { forceCreate = false, announceSwitch = false } = {}) => {
+    const existingPageSessionId = !forceCreate ? await getPageSession(tabInfo.url) : null;
+    let activeSessionId = existingPageSessionId;
+
+    if (!activeSessionId) {
+      const created = await createSession(wallet, tabInfo.url, tabInfo.domain);
+      activeSessionId = created.id || created.session_id;
+      await savePageSession(tabInfo.url, activeSessionId);
+    }
+
+    setSessionId(activeSessionId);
+    await saveCurrentSession(activeSessionId);
+    await loadSessionMessages(wallet, activeSessionId, {
+      appendContextMessage: announceSwitch ? createContextSwitchMessage(tabInfo.domain) : null,
+    });
+    return activeSessionId;
+  };
+
   useEffect(() => {
     const checkUrlChange = async () => {
       try {
@@ -115,19 +184,9 @@ const ChatWindow = () => {
           setCurrentPageDomain(tabInfo.domain);
           setCurrentProductData(null);
 
-          setMessages([{
-            id: `page-change-${Date.now()}`,
-            type: 'bot',
-            content: `Page changed.\n\nYou are now on: ${tabInfo.domain}\n\nI cleared the previous product context and I am ready for this page.`,
-            timestamp: new Date().toISOString(),
-          }]);
-
           if (walletAddress) {
             try {
-              const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-              const newSessionId = newSession.id || newSession.session_id;
-              setSessionId(newSessionId);
-              await saveCurrentSession(newSessionId);
+              await ensureSessionForPage(walletAddress, tabInfo, { announceSwitch: true });
             } catch (sessionError) {
               console.error('Error creating session for new page:', sessionError);
             }
@@ -170,22 +229,21 @@ const ChatWindow = () => {
       setCurrentPageDomain(tabInfo.domain);
       previousUrlRef.current = tabInfo.url;
 
-      const existingSessionId = await getCurrentSession();
+      const pageSessionId = await getPageSession(tabInfo.url);
+      const existingSessionId = pageSessionId || await getCurrentSession();
+
       if (existingSessionId) {
         try {
-          const sessionData = await getSessionDetails(wallet, existingSessionId);
-          setSessionId(existingSessionId);
-          setIsBackendAvailable(true);
-
-          if (sessionData.session && sessionData.session.chat_messages) {
-            const formattedMessages = sessionData.session.chat_messages.map((msg) => ({
-              id: msg.id,
-              type: msg.message_type === 'user' ? 'user' : 'bot',
-              content: msg.message,
-              timestamp: msg.created_at,
-            }));
-            setMessages(formattedMessages);
+          if (pageSessionId) {
+            setSessionId(pageSessionId);
+            await saveCurrentSession(pageSessionId);
+            await loadSessionMessages(wallet, pageSessionId);
+          } else {
+            setSessionId(existingSessionId);
+            await saveCurrentSession(existingSessionId);
+            await loadSessionMessages(wallet, existingSessionId);
           }
+          setIsBackendAvailable(true);
         } catch (sessionError) {
           console.error('Error loading session from backend:', sessionError);
           if (isAuthFailure(sessionError.message)) {
@@ -195,20 +253,10 @@ const ChatWindow = () => {
             setIsBackendAvailable(false);
             setError('Backend unavailable. Chat will work but history will not be saved.');
           }
-          setMessages([{
-            id: 'welcome',
-            type: 'bot',
-            content: 'Hello! I am your Lemo AI Assistant. Backend connectivity is limited right now.',
-            timestamp: new Date().toISOString(),
-          }]);
+          setMessages([createWelcomeMessage('Hello! I am your Lemo AI Assistant. Backend connectivity is limited right now.')]);
         }
       } else {
-        setMessages([{
-          id: 'welcome',
-          type: 'bot',
-          content: 'Hello! I am your Lemo AI Assistant. I can help you understand products and compare prices across platforms.',
-          timestamp: new Date().toISOString(),
-        }]);
+        setMessages([createWelcomeMessage()]);
       }
 
       setIsLoadingSession(false);
@@ -357,16 +405,7 @@ const ChatWindow = () => {
       setCurrentProductData(null);
 
       if (walletAddress) {
-        const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-        const newSessionId = newSession.id || newSession.session_id;
-        setSessionId(newSessionId);
-        await saveCurrentSession(newSessionId);
-        setMessages((prev) => [...prev, {
-          id: `refresh-${Date.now()}`,
-          type: 'bot',
-          content: 'Page context refreshed. I updated my understanding of the current page.',
-          timestamp: new Date().toISOString(),
-        }]);
+        await ensureSessionForPage(walletAddress, tabInfo, { forceCreate: true, announceSwitch: true });
       }
     } catch (refreshError) {
       console.error('Error refreshing context:', refreshError);
@@ -402,10 +441,7 @@ const ChatWindow = () => {
       if (!currentSessionId) {
         try {
           tabInfo = await getCurrentTabInfo();
-          const newSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-          currentSessionId = newSession.id || newSession.session_id;
-          setSessionId(currentSessionId);
-          await saveCurrentSession(currentSessionId);
+          currentSessionId = await ensureSessionForPage(walletAddress, tabInfo);
         } catch (sessionError) {
           console.error('[CHAT] Failed to create session:', sessionError);
           if (isAuthFailure(sessionError.message)) {
@@ -413,10 +449,7 @@ const ChatWindow = () => {
               tabInfo = await getCurrentTabInfo();
             }
             await ensureWalletAuthentication(walletAddress);
-            const retriedSession = await createSession(walletAddress, tabInfo.url, tabInfo.domain);
-            currentSessionId = retriedSession.id || retriedSession.session_id;
-            setSessionId(currentSessionId);
-            await saveCurrentSession(currentSessionId);
+            currentSessionId = await ensureSessionForPage(walletAddress, tabInfo);
           }
         }
       }
@@ -427,9 +460,9 @@ const ChatWindow = () => {
 
       const sendAndRenderResponse = async () => {
         const response = await sendChatMessage(walletAddress, currentSessionId, inputValue);
-        const productData = response.product || extractProductData(response.answer);
+        const productData = response.product || null;
         const comparisonData = response.comparison || null;
-        const shouldShowBuyCard = intent !== 'none' && productData && productData.title;
+        const shouldShowBuyCard = intent !== 'none' && productData && productData.title && !comparisonData?.products?.length;
 
         if (productData?.title) {
           setCurrentProductData(productData);
@@ -486,12 +519,8 @@ const ChatWindow = () => {
     setSessionId(null);
     setCurrentProductData(null);
     await saveCurrentSession(null);
-    setMessages([{
-      id: 'welcome',
-      type: 'bot',
-      content: 'Hello! I am your Lemo AI Assistant. I can help you find products and compare prices across platforms. Try asking me about a product.',
-      timestamp: new Date().toISOString(),
-    }]);
+    await savePageSession(currentPageUrl, null);
+    setMessages([createWelcomeMessage('Hello! I am your Lemo AI Assistant. I can help you find products and compare prices across platforms. Try asking me about the current product or tell me your budget and preferences.')]);
   };
 
   const formatTime = (timestamp) => {
@@ -563,18 +592,18 @@ const ChatWindow = () => {
               )}
             </div>
 
-            <div className={`flex-1 max-w-[75%] ${message.type === 'user' ? 'items-end' : 'items-start'}`}>
+            <div className={`flex-1 max-w-[82%] ${message.type === 'user' ? 'items-end' : 'items-start'}`}>
               <div
                 className={`rounded-2xl px-4 py-3 shadow-sm ${
                   message.type === 'bot'
                     ? message.isError
                       ? 'bg-red-50 border border-red-200 rounded-tl-sm text-gray-800'
-                      : 'bg-white border border-orange-200 rounded-tl-sm text-gray-800'
-                    : 'bg-gradient-to-r from-[#FF7A00] to-[#E76500] text-white rounded-tr-sm'
+                      : 'bg-white border border-orange-200 rounded-tl-sm text-gray-800 shadow-[0_12px_30px_rgba(249,115,22,0.08)]'
+                    : 'bg-gradient-to-r from-[#FF7A00] to-[#E76500] text-white rounded-tr-sm shadow-[0_12px_28px_rgba(231,101,0,0.24)]'
                 }`}
               >
                 {isMarkdown(message.content) && message.type === 'bot' ? (
-                  <div className="prose prose-sm max-w-none">
+                  <div className="prose prose-sm max-w-none prose-headings:mb-2 prose-headings:mt-0 prose-headings:text-gray-900 prose-p:my-2 prose-p:text-gray-700 prose-strong:text-gray-900 prose-ul:my-2 prose-li:my-1 prose-li:text-gray-700">
                     <ReactMarkdown>{message.content}</ReactMarkdown>
                   </div>
                 ) : (

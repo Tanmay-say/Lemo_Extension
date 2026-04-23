@@ -81,10 +81,11 @@ export const injectOverlayStyles = () => {
       display: none;
     }
 
-    /* Page Content Adjustment */
+    /* Keep the host page stable. The overlay should float above it instead of
+       forcing page reflow, which breaks layouts on Flipkart/Meesho. */
     body.lemo-overlay-active {
-      margin-right: 420px;
-      transition: margin-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      margin-right: 0 !important;
+      transition: none !important;
     }
 
     /* Responsive */
@@ -94,7 +95,7 @@ export const injectOverlayStyles = () => {
       }
 
       body.lemo-overlay-active {
-        margin-right: 0;
+        margin-right: 0 !important;
       }
     }
 
